@@ -21,6 +21,8 @@ from app.models.managed_vulnerability import ManagedVulnerability
 from app.models.project import Project
 from app.models.user import User
 from app.services.vulnerability_report_generation import GeneratedReportBundle
+import app.services.agent.tools as agent_tools_module
+import app.services.rag as rag_module
 
 
 def build_test_app() -> FastAPI:
@@ -680,3 +682,113 @@ async def test_auto_generate_managed_reports_skips_when_verification_enabled(mon
     assert message_result.scalars().all() == []
 
 
+
+
+@pytest.mark.asyncio
+async def test_initialize_tools_builds_sandbox_tools_without_local_scope_error(monkeypatch):
+    class FakeSimpleTool:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    class FakeSandboxTool(FakeSimpleTool):
+        pass
+
+    class FakeEmbeddingService:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.batch_size = None
+
+    class FakeCodeIndexer:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        async def smart_index_directory(self, **kwargs):
+            if False:
+                yield None
+            return
+
+    class FakeCodeRetriever:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    simple_tool_names = [
+        'FileReadTool',
+        'ReadManyFilesTool',
+        'FileSearchTool',
+        'ListFilesTool',
+        'PatternMatchTool',
+        'DataFlowAnalysisTool',
+        'SemgrepTool',
+        'BanditTool',
+        'GitleaksTool',
+        'NpmAuditTool',
+        'SafetyTool',
+        'TruffleHogTool',
+        'OSVScannerTool',
+        'ThinkTool',
+        'ReflectTool',
+        'CreateVulnerabilityReportTool',
+        'SkillBodyTool',
+        'SkillResourceTool',
+        'RAGQueryTool',
+        'SecurityCodeSearchTool',
+        'FunctionContextTool',
+        'SmartScanTool',
+        'QuickAuditTool',
+        'SandboxTool',
+        'SandboxHttpTool',
+        'VulnerabilityVerifyTool',
+        'PhpTestTool',
+        'PythonTestTool',
+        'JavaScriptTestTool',
+        'JavaTestTool',
+        'GoTestTool',
+        'RubyTestTool',
+        'ShellTestTool',
+        'UniversalCodeTestTool',
+        'CommandInjectionTestTool',
+        'SqlInjectionTestTool',
+        'XssTestTool',
+        'PathTraversalTestTool',
+        'SstiTestTool',
+        'DeserializationTestTool',
+        'UniversalVulnTestTool',
+        'RunCodeTool',
+        'ExtractFunctionTool',
+    ]
+
+    for name in simple_tool_names:
+        monkeypatch.setattr(
+            agent_tools_module,
+            name,
+            FakeSandboxTool if name == 'SandboxTool' else type(name, (FakeSimpleTool,), {}),
+            raising=False,
+        )
+
+    monkeypatch.setattr(agent_tools_module, 'build_shared_agent_tool_catalog', lambda **kwargs: {'read_file': FakeSimpleTool()}, raising=False)
+    monkeypatch.setattr(agent_tools_module, 'build_agent_skill_tools', lambda **kwargs: {}, raising=False)
+    monkeypatch.setattr(agent_tools_module, 'build_agent_tool_catalog', lambda **kwargs: {}, raising=False)
+    monkeypatch.setattr(agent_tasks_endpoint, 'SecurityKnowledgeQueryTool', type('SecurityKnowledgeQueryTool', (FakeSimpleTool,), {}), raising=False)
+    monkeypatch.setattr(agent_tasks_endpoint, 'GetVulnerabilityKnowledgeTool', type('GetVulnerabilityKnowledgeTool', (FakeSimpleTool,), {}), raising=False)
+
+    monkeypatch.setattr(rag_module, 'EmbeddingService', FakeEmbeddingService, raising=False)
+    monkeypatch.setattr(rag_module, 'CodeIndexer', FakeCodeIndexer, raising=False)
+    monkeypatch.setattr(rag_module, 'CodeRetriever', FakeCodeRetriever, raising=False)
+    monkeypatch.setattr(rag_module, 'IndexUpdateMode', SimpleNamespace(SMART='smart'), raising=False)
+
+    tools = await agent_tasks_endpoint._initialize_tools(
+        project_root='D:/repo',
+        llm_service=SimpleNamespace(),
+        user_config={},
+        sandbox_manager=SimpleNamespace(),
+        user_id='user-1',
+    )
+
+    assert 'sandbox_exec' in tools['finding']
+    assert isinstance(tools['finding']['sandbox_exec'], FakeSandboxTool)
+    assert 'sandbox_exec' in tools['verification']
+    assert isinstance(tools['verification']['sandbox_exec'], FakeSandboxTool)

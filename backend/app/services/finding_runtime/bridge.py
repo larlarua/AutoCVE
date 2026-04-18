@@ -439,12 +439,12 @@ class FindingRuntimeBridge:
             fallback_payload_builder=self._default_fallback_payload,
         )
 
-    async def continue_chat_session(
+    async def continue_dialogue_session(
         self,
         *,
         session_id: str,
         model_name: str = "finding-runtime",
-        max_turns: int = 8,
+        max_turns: int | None = None,
     ) -> dict[str, Any]:
         model_client = RuntimeLLMModelClient(llm_service=self._llm_service, agent_type="finding")
         tool_registry = self._build_tool_registry()
@@ -472,12 +472,25 @@ class FindingRuntimeBridge:
             "tool_call_count": len(snapshot.tool_calls),
         }
 
+    async def continue_chat_session(
+        self,
+        *,
+        session_id: str,
+        model_name: str = "finding-runtime",
+        max_turns: int | None = None,
+    ) -> dict[str, Any]:
+        return await self.continue_dialogue_session(
+            session_id=session_id,
+            model_name=model_name,
+            max_turns=max_turns,
+        )
+
     async def continue_chat_session_stream(
         self,
         *,
         session_id: str,
         model_name: str = "finding-runtime",
-        max_turns: int = 8,
+        max_turns: int | None = None,
         event_sink: Callable[[dict[str, Any]], Any] | None = None,
     ) -> dict[str, Any]:
         model_client = RuntimeLLMModelClient(llm_service=self._llm_service, agent_type="finding")
@@ -506,7 +519,6 @@ class FindingRuntimeBridge:
             "turn_count": len(snapshot.turns),
             "tool_call_count": len(snapshot.tool_calls),
         }
-
     async def continue_session_until_payload(
         self,
         *,

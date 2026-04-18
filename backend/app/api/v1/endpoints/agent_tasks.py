@@ -1039,6 +1039,7 @@ async def _initialize_tools(
         RAGQueryTool,
         SecurityCodeSearchTool,
         FunctionContextTool,
+        SandboxTool,
         build_shared_agent_tool_catalog,
         build_agent_skill_tools,
         build_agent_tool_catalog,
@@ -1212,7 +1213,6 @@ async def _initialize_tools(
         finding_tools["function_context"] = FunctionContextTool(retriever)
 
     from app.services.agent.tools import (
-        SandboxTool,
         SandboxHttpTool,
         VulnerabilityVerifyTool,
         PhpTestTool,
