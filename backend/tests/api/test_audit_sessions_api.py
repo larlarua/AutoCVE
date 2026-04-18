@@ -301,3 +301,75 @@ async def test_post_follow_up_message_continues_runtime_session(monkeypatch):
     assert messages.json()[0]["role"] == "user"
     assert messages.json()[1]["role"] == "assistant"
     assert messages.json()[1]["payload"]["continued"] is True
+
+@pytest.mark.asyncio
+async def test_stream_follow_up_message_for_runtime_session_uses_runtime_continuation(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        session = AuditSession(
+            project_id="project-1",
+            task_id="task-1",
+            runtime_stack="runtime",
+            state="completed",
+        )
+        db.add(session)
+        await db.commit()
+        session_id = session.id
+
+    app = build_test_app()
+
+    async def override_get_db():
+        async with session_factory() as db:
+            yield db
+
+    async def override_get_current_user():
+        return SimpleNamespace(id="user-1", is_active=True)
+
+    continuation_calls: list[tuple[str, str]] = []
+
+    async def fake_continue_runtime_session(*, session_id: str, content: str, db):
+        continuation_calls.append((session_id, content))
+        db.add(
+            AuditSessionMessage(
+                session_id=session_id,
+                sequence=2,
+                role="assistant",
+                content="Runtime loop persisted the real follow-up response.",
+                message_metadata={"kind": "runtime_follow_up_response"},
+                payload={"continued": True},
+            )
+        )
+        await db.commit()
+
+    async def fail_build_follow_up_llm_service(*, session, db):
+        raise AssertionError("streaming follow-up path should not build a direct LLM follow-up service for runtime sessions")
+
+    monkeypatch.setattr(audit_sessions_endpoint, "continue_runtime_session", fake_continue_runtime_session, raising=False)
+    monkeypatch.setattr(audit_sessions_endpoint, "_build_follow_up_llm_service", fail_build_follow_up_llm_service, raising=False)
+
+    app.dependency_overrides[deps.get_db] = override_get_db
+    app.dependency_overrides[deps.get_current_user] = override_get_current_user
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            f"/api/v1/audit-sessions/{session_id}/messages/stream",
+            json={"content": "please continue the audit"},
+            headers={"Accept": "text/event-stream"},
+        )
+        messages = await client.get(f"/api/v1/audit-sessions/{session_id}/messages")
+
+    await engine.dispose()
+
+    assert response.status_code == 200
+    assert continuation_calls == [(session_id, "please continue the audit")]
+    assert '"type": "user_message"' in response.text
+    assert '"type": "done"' in response.text
+    assert len(messages.json()) == 2
+    assert messages.json()[0]["metadata"]["kind"] == "follow_up_user_message"
+    assert messages.json()[1]["metadata"]["kind"] == "runtime_follow_up_response"

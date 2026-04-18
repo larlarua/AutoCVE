@@ -521,8 +521,6 @@ async def stream_audit_session_message(
     if session is None:
         raise HTTPException(status_code=404, detail="Audit session not found")
 
-    llm_service, _task = await _build_follow_up_llm_service(session=session, db=db)
-
     next_sequence = await db.scalar(
         select(func.max(AuditSessionMessage.sequence)).where(AuditSessionMessage.session_id == session_id)
     )
@@ -537,6 +535,30 @@ async def stream_audit_session_message(
     db.add(user_message)
     await db.commit()
     await db.refresh(user_message)
+
+    if session.runtime_stack == "runtime":
+        async def runtime_event_generator():
+            yield _format_sse_event({
+                "type": "user_message",
+                "message": _to_message_response(user_message).model_dump(mode="json"),
+            })
+            try:
+                await continue_runtime_session(session_id=session_id, content=payload.content, db=db)
+                yield _format_sse_event({
+                    "type": "done",
+                    "usage": {},
+                })
+            except Exception as exc:
+                await db.rollback()
+                yield _format_sse_event({"type": "error", "message": str(exc)})
+
+        return StreamingResponse(
+            runtime_event_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
+    llm_service, _task = await _build_follow_up_llm_service(session=session, db=db)
 
     transcript_result = await db.execute(
         select(AuditSessionMessage)
