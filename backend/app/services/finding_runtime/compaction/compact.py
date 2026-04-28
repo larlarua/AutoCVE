@@ -324,7 +324,7 @@ async def _summarize_messages(
     while True:
         response = await _await_maybe(
             model_client.complete(
-                system_prompt="You are a helpful AI assistant tasked with summarizing conversations.",
+                system_prompt="你是一个负责总结对话的 AI 助手。请使用简体中文总结。",
                 recon_payload={},
                 transcript=[*request_messages, summary_request],
                 model_name=model,

@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from app.services.agent.core.errors import LLMRateLimitError
+from app.services.agent.core.errors import LLMConnectionError, LLMRateLimitError
 from app.services.llm.service import LLMService
 
 
@@ -102,6 +102,28 @@ class _StreamingProbeAdapter:
                     "arguments": "{\"file_path\":\"README.md\"}",
                 }
             ],
+        }
+
+
+class _StreamingRetryProbeAdapter:
+    def __init__(self, failures_before_success: int):
+        self.failures_before_success = failures_before_success
+        self.calls = 0
+
+    async def complete(self, request):
+        raise AssertionError("chat_completion_stream should use adapter.stream_complete")
+
+    async def stream_complete(self, request):
+        self.calls += 1
+        if self.calls <= self.failures_before_success:
+            raise LLMConnectionError("No available accounts: temporarily unavailable")
+        yield {"type": "token", "content": "恢复", "accumulated": "恢复"}
+        yield {
+            "type": "done",
+            "content": "恢复",
+            "finish_reason": "stop",
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+            "tool_calls": [],
         }
 
 
@@ -257,3 +279,60 @@ async def test_llm_service_chat_completion_stream_preserves_provider_tool_call_e
     assert adapter.request.stream is True
     assert adapter.request.parallel_tool_calls is True
     assert adapter.complete_called is False
+
+
+@pytest.mark.asyncio
+async def test_llm_service_chat_completion_stream_retries_connection_failures_before_first_output(monkeypatch):
+    adapter = _StreamingRetryProbeAdapter(failures_before_success=2)
+    service = LLMService(
+        user_config={
+            "llmConfig": {
+                "llmProvider": "openai",
+                "llmApiKey": "test-key",
+                "llmModel": "test-model",
+            }
+        }
+    )
+
+    monkeypatch.setattr("app.services.llm.service.LLMFactory.create_adapter", lambda config: adapter)
+
+    events = []
+    async for event in service.chat_completion_stream(
+        messages=[{"role": "user", "content": "retry stream"}],
+    ):
+        events.append(event)
+
+    assert [event["type"] for event in events] == ["llm_retry", "llm_retry", "token", "done"]
+    assert events[0]["attempt"] == 1
+    assert events[0]["max_attempts"] == 3
+    assert "自动重试" in events[0]["message_text"]
+    assert events[1]["attempt"] == 2
+    assert events[2]["content"] == "恢复"
+    assert adapter.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_llm_service_chat_completion_stream_returns_error_after_three_connection_failures(monkeypatch):
+    adapter = _StreamingRetryProbeAdapter(failures_before_success=3)
+    service = LLMService(
+        user_config={
+            "llmConfig": {
+                "llmProvider": "openai",
+                "llmApiKey": "test-key",
+                "llmModel": "test-model",
+            }
+        }
+    )
+
+    monkeypatch.setattr("app.services.llm.service.LLMFactory.create_adapter", lambda config: adapter)
+
+    events = []
+    async for event in service.chat_completion_stream(
+        messages=[{"role": "user", "content": "retry stream"}],
+    ):
+        events.append(event)
+
+    assert [event["type"] for event in events] == ["llm_retry", "llm_retry", "error"]
+    assert events[-1]["error_type"] == "connection"
+    assert "已自动重试 3 次" in events[-1]["user_message"]
+    assert adapter.calls == 3

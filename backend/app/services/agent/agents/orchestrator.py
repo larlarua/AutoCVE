@@ -10,17 +10,17 @@ from ..prompts import MULTI_AGENT_RULES
 logger = logging.getLogger(__name__)
 
 
-ORCHESTRATOR_SYSTEM_PROMPT = """You are the deterministic orchestrator for AuditAI.
-You do not let the LLM choose major stages.
-You execute a fixed plan:
-1. planning
-2. recon
-3. parallel analysis:
+ORCHESTRATOR_SYSTEM_PROMPT = """你是 AuditAI 的确定性编排 Agent。
+你不能让 LLM 自行决定主要阶段。
+你必须执行固定流程：
+1. 规划
+2. Recon 信息收集
+3. 并行分析：
    - scan -> triage
    - finding
-4. merge
-5. verification
-6. finalize
+4. 合并
+5. verification 验证
+6. finalize 收尾
 """
 
 
@@ -438,6 +438,26 @@ class OrchestratorAgent(BaseAgent):
 
             if workflow_state["effective_agents"]["finding"]:
                 finding_result = await self._run_sub_agent("finding", finding_payload)
+                if not finding_result.success:
+                    error = finding_result.error or "Finding agent failed before producing finalized findings."
+                    await self.emit_event(
+                        "phase_failed",
+                        "analysis failed",
+                        metadata={"phase": "analysis", "agent": "finding", "error": error},
+                    )
+                    return AgentResult(
+                        success=False,
+                        error=error,
+                        data={
+                            "phases": {
+                                "recon": recon_result.to_dict(),
+                                "finding": finding_result.to_dict(),
+                            },
+                            "workflow": workflow_state,
+                            "findings": [],
+                            "summary": {"error": error},
+                        },
+                    )
             else:
                 finding_result = self._build_skipped_result("finding", "Finding agent disabled in workflow config.")
                 await self.emit_event("thinking", "Skipping finding: disabled in workflow config.", metadata={"agent": "finding", "skipped": True})

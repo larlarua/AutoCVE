@@ -99,7 +99,7 @@ class TodoWriteTool(AgentTool):
 
     @property
     def description(self) -> str:
-        return "Create a shared todo item for the current agent session"
+        return "为当前 Agent 会话创建共享待办项"
 
     @property
     def args_schema(self):
@@ -129,7 +129,7 @@ class AskUserTool(AgentTool):
 
     @property
     def description(self) -> str:
-        return "Record a blocking question for the human operator"
+        return "为人工操作员记录一个阻塞问题"
 
     @property
     def args_schema(self):
@@ -160,7 +160,7 @@ class EnterPlanModeTool(AgentTool):
 
     @property
     def description(self) -> str:
-        return "Enter shared plan mode for the current agent"
+        return "让当前 Agent 进入共享计划模式"
 
     @property
     def args_schema(self):
@@ -180,7 +180,7 @@ class EnterPlanModeTool(AgentTool):
         })
         runtime_state.metadata["plan_mode"] = dict(plan_state)
         _sync_runtime_state(agent, runtime_state)
-        return ToolResult(success=True, data="Plan mode enabled", metadata={"plan_mode": dict(plan_state), "interaction": "plan_mode_enter"})
+        return ToolResult(success=True, data="计划模式已启用", metadata={"plan_mode": dict(plan_state), "interaction": "plan_mode_enter"})
 
 
 class ExitPlanModeTool(AgentTool):
@@ -192,7 +192,7 @@ class ExitPlanModeTool(AgentTool):
 
     @property
     def description(self) -> str:
-        return "Exit shared plan mode for the current agent"
+        return "让当前 Agent 退出共享计划模式"
 
     @property
     def args_schema(self):
@@ -211,4 +211,4 @@ class ExitPlanModeTool(AgentTool):
         })
         runtime_state.metadata["plan_mode"] = dict(plan_state)
         _sync_runtime_state(agent, runtime_state)
-        return ToolResult(success=True, data="Plan mode disabled", metadata={"plan_mode": dict(plan_state), "interaction": "plan_mode_exit"})
+        return ToolResult(success=True, data="计划模式已关闭", metadata={"plan_mode": dict(plan_state), "interaction": "plan_mode_exit"})

@@ -49,8 +49,8 @@ class SkillBodyTool(AgentTool):
     @property
     def description(self) -> str:
         return (
-            "Load the full SKILL.md body for a skill from the local skill_library folder. "
-            "Use this after reviewing skill metadata and deciding you need the complete instructions."
+            "从本地 skill_library 文件夹加载某个技能的完整 SKILL.md 正文。"
+            "在查看技能元数据并确认需要完整说明后使用。"
         )
 
     @property
@@ -90,8 +90,8 @@ class SkillResourceTool(AgentTool):
     @property
     def description(self) -> str:
         return (
-            "Inspect or read files from a skill's references/examples/scripts folders inside skill_library. "
-            "Use mode='list' to view available directories/files first, then mode='read' to open a concrete file."
+            "查看或读取 skill_library 中某个技能 references/examples/scripts 目录下的文件。"
+            "先用 mode='list' 查看可用目录或文件，再用 mode='read' 打开具体文件。"
         )
 
     @property

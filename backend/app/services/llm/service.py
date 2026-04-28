@@ -303,7 +303,20 @@ class LLMService:
             return LLMRateLimitError(message, retry_after=15, cause=error)
         if "timeout" in lowered or "timed out" in lowered:
             return LLMTimeoutError(message, cause=error)
-        if any(token in lowered for token in ("connection", "connect", "network", "dns", "temporarily unavailable")):
+        if status_code == 503 or any(
+            token in lowered
+            for token in (
+                "connection",
+                "connect",
+                "network",
+                "dns",
+                "temporarily unavailable",
+                "service unavailable",
+                "server disconnected",
+                "no available accounts",
+                "unavailable account",
+            )
+        ):
             return LLMConnectionError(message, cause=error)
         return error
 
@@ -337,14 +350,141 @@ class LLMService:
 
     async def _execute_chat_completion_stream(self, adapter: Any, request: LLMRequest, config: LLMConfig):
         semaphore = self._get_provider_semaphore(config)
+        retry_config = RetryConfig(
+            max_attempts=LLM_RETRY_CONFIG.max_attempts,
+            base_delay=LLM_RETRY_CONFIG.base_delay,
+            max_delay=LLM_RETRY_CONFIG.max_delay,
+            exponential_base=LLM_RETRY_CONFIG.exponential_base,
+            jitter=LLM_RETRY_CONFIG.jitter,
+            jitter_factor=LLM_RETRY_CONFIG.jitter_factor,
+            backoff_strategy=LLM_RETRY_CONFIG.backoff_strategy,
+            retryable_exceptions=LLM_RETRY_CONFIG.retryable_exceptions,
+        )
 
-        async with semaphore:
-            await self._await_provider_gap(config)
-            try:
-                async for event in adapter.stream_complete(request):
-                    yield event
-            except Exception as exc:  # noqa: BLE001
-                raise self._normalize_retryable_llm_error(exc) from exc
+        attempt = 0
+        while True:
+            emitted_any_output = False
+            retry_decision: tuple[Exception, float] | None = None
+
+            async with semaphore:
+                await self._await_provider_gap(config)
+                try:
+                    async for event in adapter.stream_complete(request):
+                        event_type = str((event or {}).get("type") or "").strip().lower()
+                        if event_type in {"token", "tool_call", "done"}:
+                            emitted_any_output = True
+
+                        if event_type == "error":
+                            normalized_error = self._normalize_stream_error_event(event)
+                            if (
+                                not emitted_any_output
+                                and attempt < retry_config.max_attempts - 1
+                                and retry_config.should_retry(normalized_error)
+                            ):
+                                retry_decision = (
+                                    normalized_error,
+                                    retry_config.calculate_delay(attempt, normalized_error),
+                                )
+                                break
+                            yield self._build_terminal_stream_error_event(
+                                normalized_error,
+                                base_event=event,
+                                max_attempts=retry_config.max_attempts,
+                                attempts_used=attempt + 1,
+                            )
+                            return
+
+                        yield event
+                        if event_type == "done":
+                            return
+                except Exception as exc:  # noqa: BLE001
+                    normalized_error = self._normalize_retryable_llm_error(exc)
+                    if (
+                        not emitted_any_output
+                        and attempt < retry_config.max_attempts - 1
+                        and retry_config.should_retry(normalized_error)
+                    ):
+                        retry_decision = (
+                            normalized_error,
+                            retry_config.calculate_delay(attempt, normalized_error),
+                        )
+                    else:
+                        yield self._build_terminal_stream_error_event(
+                            normalized_error,
+                            base_event=None,
+                            max_attempts=retry_config.max_attempts,
+                            attempts_used=attempt + 1,
+                        )
+                        return
+
+            if retry_decision is None:
+                return
+
+            attempt += 1
+            error, delay = retry_decision
+            yield self._build_llm_retry_event(
+                error=error,
+                attempt=attempt,
+                max_attempts=retry_config.max_attempts,
+            )
+            await asyncio.sleep(delay)
+
+    def _normalize_stream_error_event(self, event: Dict[str, Any]) -> Exception:
+        error_type = str(event.get("error_type") or "").strip().lower()
+        error_message = str(event.get("error") or event.get("user_message") or "LLM streaming request failed").strip()
+
+        if error_type == "rate_limit":
+            return LLMRateLimitError(error_message, retry_after=15)
+        if error_type == "connection":
+            return LLMConnectionError(error_message)
+        if error_type == "quota_exceeded":
+            return Exception(error_message)
+        return self._normalize_retryable_llm_error(Exception(error_message))
+
+    @staticmethod
+    def _describe_stream_error(error: Exception) -> tuple[str, str]:
+        if isinstance(error, LLMRateLimitError):
+            return "rate_limit", "模型服务当前请求过多，"
+        if isinstance(error, LLMTimeoutError):
+            return "timeout", "模型响应超时，"
+        if isinstance(error, LLMConnectionError):
+            return "connection", "上游模型账号或连接暂时不可用，"
+        return "unknown", "模型服务暂时不可用，"
+
+    @classmethod
+    def _build_llm_retry_event(cls, *, error: Exception, attempt: int, max_attempts: int) -> Dict[str, Any]:
+        error_type, prefix = cls._describe_stream_error(error)
+        return {
+            "type": "llm_retry",
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "error_type": error_type,
+            "message_text": f"{prefix}正在进行第 {attempt}/{max_attempts} 次自动重试……",
+            "error": str(error),
+        }
+
+    @classmethod
+    def _build_terminal_stream_error_event(
+        cls,
+        error: Exception,
+        *,
+        base_event: Dict[str, Any] | None,
+        max_attempts: int,
+        attempts_used: int,
+    ) -> Dict[str, Any]:
+        payload = dict(base_event or {})
+        error_type, _ = cls._describe_stream_error(error)
+        if isinstance(error, (LLMConnectionError, LLMTimeoutError, LLMRateLimitError)) and attempts_used >= max_attempts:
+            user_message = f"模型服务连接失败，已自动重试 {max_attempts} 次仍未恢复。请稍后重试或切换可用账号。"
+        else:
+            user_message = str(payload.get("user_message") or str(error) or "LLM streaming request failed").strip()
+        return {
+            **payload,
+            "type": "error",
+            "error_type": str(payload.get("error_type") or error_type or "unknown"),
+            "error": str(payload.get("error") or str(error)),
+            "user_message": user_message,
+        }
 
     def _build_analysis_schema(self) -> str:
         return json.dumps(

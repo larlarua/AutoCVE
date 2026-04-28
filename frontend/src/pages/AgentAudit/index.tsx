@@ -6,7 +6,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Terminal, Bot, Loader2, Radio, Filter, Maximize2, ArrowDown, FileText } from "lucide-react";
+import { Terminal, Bot, Loader2, Radio, Filter, Maximize2, FileText } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 import { useAgentStream } from "@/hooks/useAgentStream";
@@ -157,10 +157,10 @@ function AgentAuditPageContent() {
   const { taskId } = useParams<{ taskId: string }>();
   const {
     task, findings, agentTree, logs, selectedAgentId, showAllLogs,
-    isLoading, connectionStatus, isAutoScroll, expandedLogIds,
+    isLoading, connectionStatus, expandedLogIds,
     treeNodes, filteredLogs, isRunning, isComplete,
     setTask, setFindings, setAgentTree, addLog, updateLog, removeLog,
-    selectAgent, setLoading, setConnectionStatus, setAutoScroll, toggleLogExpanded,
+    selectAgent, setLoading, setConnectionStatus, toggleLogExpanded,
     setCurrentAgentName, getCurrentAgentName, setCurrentThinkingId, getCurrentThinkingId,
     dispatch, reset,
   } = useAgentAuditState();
@@ -174,7 +174,6 @@ function AgentAuditPageContent() {
   const [statusVerb, setStatusVerb] = useState(ACTION_VERBS[0]);
   const [statusDots, setStatusDots] = useState(0);
 
-  const logEndRef = useRef<HTMLDivElement>(null);
   const agentTreeRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAgentTreeRefreshTime = useRef<number>(0);
   const previousTaskIdRef = useRef<string | undefined>(undefined);
@@ -1257,13 +1256,6 @@ function AgentAuditPageContent() {
     return () => clearInterval(interval);
   }, [taskId, isRunning, loadTask]);
 
-  // Auto scroll
-  useEffect(() => {
-    if (isAutoScroll && logEndRef.current) {
-      logEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [logs, isAutoScroll]);
-
   // ============ Handlers ============
 
   const handleAgentSelect = useCallback((agentId: string) => {
@@ -1394,21 +1386,6 @@ function AgentAuditPageContent() {
                   </div>
                 )}
 
-                {activeDetailView === 'activity' && (
-                  <button
-                    onClick={() => setAutoScroll(!isAutoScroll)}
-                    className={`
-                      flex items-center gap-2 text-xs px-3 py-1.5 rounded-md font-mono uppercase tracking-wider
-                      ${isAutoScroll
-                        ? 'bg-primary/15 text-primary border border-primary/50'
-                        : 'text-muted-foreground hover:text-foreground border border-border hover:bg-muted'
-                      }
-                    `}
-                  >
-                    <ArrowDown className="w-3.5 h-3.5" />
-                    <span>Auto-scroll</span>
-                  </button>
-                )}
               </div>
             </div>
           </div>
@@ -1467,11 +1444,10 @@ function AgentAuditPageContent() {
                     ))}
                   </div>
                 )}
-                <div ref={logEndRef} />
               </div>
-            ) : findings.length > 0 ? (
+            ) : findings.length > 0 || (task?.recovered_candidates_count ?? 0) > 0 ? (
               <div className="h-full overflow-y-auto p-5 custom-scrollbar">
-                <FinalReportPanel task={task} findings={findings} />
+                <FinalReportPanel task={task} findings={findings} recoveredCandidates={task?.recovered_candidates || []} />
               </div>
             ) : (
               <div className="flex h-full items-center justify-center p-6 text-center text-muted-foreground">
@@ -1503,6 +1479,24 @@ function AgentAuditPageContent() {
                   <span className="flex items-center gap-2 text-muted-foreground font-mono">
                     <span className={`w-2 h-2 rounded-full ${task.status === 'completed' ? 'bg-emerald-500' : task.status === 'failed' ? 'bg-rose-500' : 'bg-amber-500'}`} />
                     AUDIT {task.status?.toUpperCase()}
+                    {task.finding_outcome && task.finding_outcome !== 'none' ? (
+                      <Badge
+                        variant="outline"
+                        className={`ml-2 font-mono text-[10px] ${
+                          task.finding_outcome === 'finalized'
+                            ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600'
+                            : task.finding_outcome === 'recovered_only'
+                              ? 'border-sky-500/30 bg-sky-500/10 text-sky-600'
+                              : 'border-amber-500/30 bg-amber-500/10 text-amber-700'
+                        }`}
+                      >
+                        {task.finding_outcome === 'finalized'
+                          ? 'FINALIZED'
+                          : task.finding_outcome === 'recovered_only'
+                            ? 'RECOVERED ONLY'
+                            : 'INCOMPLETE'}
+                      </Badge>
+                    ) : null}
                   </span>
                 ) : (
                   <span className="text-muted-foreground font-mono">READY</span>

@@ -243,46 +243,46 @@ def build_finding_skill_route_message(context: Dict[str, Any], skill_context: Di
     lines.extend(
         [
             "",
-            "Finding skill route plan:",
-            f"- Primary audit skill: {primary_skill}",
-            f"- Bootstrap first: read the catalog entry's skill_file_path for {primary_skill}; use load_skill_body only as a compatibility fallback.",
+            "Finding 技能路由计划：",
+            f"- 主审计技能：{primary_skill}",
+            f"- 启动步骤：先读取 {primary_skill} 目录条目中的 skill_file_path；仅在兼容旧流程时才回退使用 load_skill_body。",
         ]
     )
     if secondary_skills:
-        lines.append(f"- Secondary skills for targeted follow-up: {', '.join(secondary_skills)}")
+        lines.append(f"- 定向跟进的辅助技能：{', '.join(secondary_skills)}")
     for reason in route.get("selection_reason", []):
-        lines.append(f"- Route reason: {reason}")
+        lines.append(f"- 路由原因：{reason}")
 
     lines.extend(
         [
             "",
-            "Batch-read guidance:",
-            "- When comparing source, sink, controller, service, mapper, or xml files, prefer read_many_files.",
-            "- If read_many_files is not enough, use Action Batch to read several concrete files in one loop.",
-            "- After bootstrapping the primary skill, read only the minimum core references needed to start code auditing.",
-            "- Use list_files on the catalog entry's references_root before opening a new skill reference family.",
-            "- Do not exhaust every mandatory reference before reading candidate code.",
+            "批量读取建议：",
+            "- 对比 source、sink、controller、service、mapper 或 xml 文件时，优先读取少量相关文件。",
+            "- 如果一次读取不够，请在一个循环中通过原生工具调用读取多个明确文件。",
+            "- 启动主技能后，只读取开始代码审计所需的最少核心参考。",
+            "- 打开新的技能参考目录前，先在目录条目的 references_root 下列出相关文件。",
+            "- 不要在阅读候选代码前耗尽所有 mandatory reference。",
         ]
     )
 
     if route["mandatory_reads"]:
-        lines.extend(["", "Project-specific reference shortlist (read on demand):"])
+        lines.extend(["", "项目相关参考文件清单（按需读取）："])
         lines.extend(f"- {path}" for path in route["mandatory_reads"])
     if route["recommended_reads"]:
-        lines.extend(["", "Project-specific optional references:"])
+        lines.extend(["", "项目相关可选参考："])
         lines.extend(f"- {path}" for path in route["recommended_reads"])
 
     lines.extend(
         [
             "",
-            "Progressive disclosure for cases:",
-            f"- First read {route['progressive_disclosure'][0]} before any WooYun case body.",
-            "- Only after you already have project-specific code evidence may you read one or two related case files.",
-            f"- Optional real-world supplement: {route['progressive_disclosure'][1]}",
-            "- Do not treat WooYun cases as evidence; they are only search-direction hints.",
+            "案例渐进披露规则：",
+            f"- 阅读任何 WooYun 案例正文前，先读取 {route['progressive_disclosure'][0]}。",
+            "- 只有已经掌握项目源码证据后，才可以读取一到两个相关案例文件。",
+            f"- 可选真实案例补充：{route['progressive_disclosure'][1]}",
+            "- 不要把 WooYun 案例当作证据，它们只能作为搜索方向提示。",
         ]
     )
     if route["case_candidates"]:
-        lines.append("- Candidate case files for this project:")
+        lines.append("- 本项目候选案例文件：")
         lines.extend(f"  - {path}" for path in route["case_candidates"][:4])
     return "\n".join(lines)

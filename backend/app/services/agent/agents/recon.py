@@ -18,9 +18,9 @@ from ..prompts import TOOL_USAGE_GUIDE
 
 logger = logging.getLogger(__name__)
 
-LIVE_RECON_OUTPUT_CONTRACT = """## Recon Output Contract
-- Recon only produces project navigation data. Do not output vulnerability conclusions.
-- Final Answer must be JSON using exactly these top-level fields:
+LIVE_RECON_OUTPUT_CONTRACT = """## Recon 输出规范
+- Recon 仅产出项目导航数据（攻击面测绘与审计路径规划），不要输出漏洞结论。
+- Final Answer 必须是 JSON，并且顶层字段必须且只能包含以下这些：
   - project_profile
   - project_structure
   - entry_points
@@ -28,36 +28,37 @@ LIVE_RECON_OUTPUT_CONTRACT = """## Recon Output Contract
   - audit_targets
   - recommended_scanners
   - summary
-- priority_paths means \"audit these paths first\", not \"these paths are vulnerable\".
-- audit_targets.target_files should contain concrete files worth direct review when available.
+- priority_paths 的含义是“建议优先审计这些路径”，不是“这些路径存在漏洞”。
+- 如果可以确定具体文件，audit_targets.target_files 应包含值得直接审查的具体文件。
 """
 
-LIVE_RECON_SYSTEM_PROMPT = """You are AuditAI's reconnaissance agent.
+LIVE_RECON_SYSTEM_PROMPT = """你是 AuditAI 的 Recon 信息收集 Agent。
 
-Your job is to collect project navigation data for the downstream finding agent.
+你的任务是为下游的 Finding Agent 收集项目导航数据（攻击面测绘与审计路径规划）。
 
-Objectives:
-1. Identify languages, frameworks, databases, package managers, and runtime indicators.
-2. Identify concrete entry points such as HTTP routes, controllers, handlers, schedulers, queue consumers, and admin surfaces.
-3. Identify priority paths that should be audited first.
-4. Recommend external scanners based on the detected stack.
-5. Produce a concise summary of what the finding agent should review first.
+目标：
+1. 识别语言、框架、数据库、包管理器以及运行时特征。
+2. 识别具体入口点，例如 HTTP 路由、控制器、处理器、调度任务、队列消费者和管理后台暴露面。
+3. 识别应当优先审计的路径。
+4. 根据识别出的技术栈推荐外部扫描器。
+5. 简要总结 finding agent 应优先审查的内容。
 
-Rules:
-- You are not the finding agent. Do not output vulnerability conclusions.
-- Do not output initial findings.
-- Use tools before answering.
-- Prefer concrete files and directories that actually exist in tool output.
-- If you are unsure, rely on observed repository evidence and keep the result conservative.
+规则：
+- 你不是 finding agent。不要输出漏洞结论。
+- 不要输出初步发现。
+- 回答前必须先使用工具。
+- 优先引用工具输出中实际存在的具体文件和目录。
+- 如果你不确定，应以仓库中已观察到的证据为准，并保持结果保守。
 
-Working format:
-Thought: explain what you need next
+工作格式：
+Thought: 说明你下一步需要什么
 Action: tool_name
-Action Input: {\"json\": \"object\"}
+Action Input: {"json": "object"}
 
-When finished, return:
+完成后，请返回：
 Final Answer: {JSON}
 """
+
 
 RECON_OUTPUT_CONTRACT = LIVE_RECON_OUTPUT_CONTRACT
 RECON_SYSTEM_PROMPT = LIVE_RECON_SYSTEM_PROMPT
@@ -136,7 +137,7 @@ class ReconAgent(BaseAgent):
         return {
             "must_use": [item for item in deduped if item in must_use],
             "optional": [item for item in deduped if item not in must_use],
-            "reason": "Use direct source review first and run stack-matched scanners as corroborating evidence.",
+            "reason": "优先直接阅读源码，并将技术栈匹配的扫描器作为佐证。",
         }
 
     def _merge_recon_with_project_info(
@@ -301,36 +302,36 @@ class ReconAgent(BaseAgent):
         exclude_patterns = config.get("exclude_patterns", [])
         
         # Cleaned legacy mojibake comment.
-        initial_message = f"""Profile the repository and collect navigation context for the finding agent.
+        initial_message = f"""请梳理代码仓库，并为 Finding Agent 收集项目导航上下文。
 
-## Project info
-- Name: {project_info.get('name', 'unknown')}
-- Root: {project_info.get('root', '.')}
-- File count: {project_info.get('file_count', 'unknown')}
+## 项目信息
+- 名称：{project_info.get('name', 'unknown')}
+- 根目录：{project_info.get('root', '.')}
+- 文件数量：{project_info.get('file_count', 'unknown')}
 
-## Available target files
+## 可用目标文件
 """
         if target_files:
-            initial_message += f"Target files provided: {len(target_files)}\n"
+            initial_message += f"已提供目标文件数量：{len(target_files)}\n"
             for tf in target_files[:10]:
                 initial_message += f"- {tf}\n"
             if len(target_files) > 10:
-                initial_message += f"- ... plus {len(target_files) - 10} more\n"
-            initial_message += "Focus on these files first, then expand to surrounding entry points and high-signal directories.\n"
+                initial_message += f"- ... 另有 {len(target_files) - 10} 个文件\n"
+            initial_message += "请先关注这些文件，再扩展到周边入口点和高信号目录。\n"
         else:
-            initial_message += "No explicit target files were provided. Discover stack, entry points, and priority paths from the repository itself.\n"
+            initial_message += "未提供明确目标文件。请从仓库自身识别技术栈、入口点和优先审计路径。\n"
 
         if exclude_patterns:
-            initial_message += f"\nExclude patterns: {', '.join(exclude_patterns[:5])}\n"
+            initial_message += f"\n排除模式：{', '.join(exclude_patterns[:5])}\n"
 
         initial_message += f"""
-## Task context
-{task_context or task or 'No extra task context provided.'}
+## 任务上下文
+{task_context or task or '未提供额外任务上下文。'}
 
-## Tooling
+## 可用工具
 {self.get_tools_description()}
 
-You must use tools before returning Final Answer. Keep the result conservative and evidence-driven.
+返回 Final Answer 前必须先使用工具。结果要保守，并以已观察到的仓库证据为依据。
 """
 
         # Conversation history
@@ -352,7 +353,7 @@ You must use tools before returning Final Answer. Keep the result conservative a
         final_result = None
         error_message = None  # Runtime error captured during recon execution
         
-        await self.emit_thinking("Recon Agent is starting repository reconnaissance.")
+        await self.emit_thinking("Recon Agent 开始收集仓库导航信息。")
         
         try:
             for iteration in range(self.config.max_iterations):
@@ -397,19 +398,19 @@ You must use tools before returning Final Answer. Keep the result conservative a
                         break
                     
                     # Cleaned legacy mojibake comment.
-                    retry_prompt = f"""Your previous reply was empty or unusable.
+                    retry_prompt = f"""你上一条回复为空或不可用。
 
-Reply using exactly one of these formats:
+请严格使用以下格式之一回复：
 
-Thought: [brief reasoning]
-Action: [one tool from the allowed tool list]
+Thought: [简要推理]
+Action: [允许工具列表中的一个工具]
 Action Input: {{"key": "value"}}
 
-Allowed tools: {', '.join(self.tools.keys())}
+允许工具：{', '.join(self.tools.keys())}
 
-Or, if recon is complete:
-Thought: [brief summary]
-Final Answer: [canonical recon JSON]
+如果 Recon 已完成：
+Thought: [简要总结]
+Final Answer: [规范 Recon JSON]
 """
                     
                     self._conversation_history.append({
@@ -477,11 +478,11 @@ Final Answer: [canonical recon JSON]
                         # Cleaned legacy mojibake comment.
                         if fail_count >= 3:
                             logger.warning(f"[{self.name}] Tool call failed {fail_count} times: {tool_call_key}")
-                            observation += f"\n\nRepeated tool failure note: this exact tool call has failed {fail_count} times.\n"
-                            observation += "1. Change strategy instead of retrying the same input blindly.\n"
-                            observation += "2. Prefer search_code or list_files to regain context.\n"
-                            observation += "3. If enough repository evidence has already been collected, summarize conservatively.\n"
-                            observation += "4. If recon is complete, return Final Answer now."
+                            observation += f"\n\n重复工具失败提示：这个完全相同的工具调用已经失败 {fail_count} 次。\n"
+                            observation += "1. 请改变策略，不要盲目重试相同输入。\n"
+                            observation += "2. 优先使用 search_code 或 list_files 重新获取上下文。\n"
+                            observation += "3. 如果已经收集到足够仓库证据，请保守总结。\n"
+                            observation += "4. 如果 Recon 已完成，请立即返回 Final Answer。"
                             
                             # Cleaned legacy mojibake comment.
                             self._failed_tool_calls[tool_call_key] = 0
@@ -510,7 +511,7 @@ Final Answer: [canonical recon JSON]
                     await self.emit_llm_decision("Missing action", "LLM response did not include a valid tool action.")
                     self._conversation_history.append({
                         "role": "user",
-                        "content": "Your last reply did not include a valid Action. Reply with Thought/Action/Action Input or Final Answer only.",
+                        "content": "你上一条回复没有包含有效 Action。请只用 Thought/Action/Action Input 或 Final Answer 回复。",
                     })
             
             # Cleaned legacy mojibake comment.
@@ -520,9 +521,9 @@ Final Answer: [canonical recon JSON]
                 # Cleaned legacy mojibake comment.
                 self._conversation_history.append({
                     "role": "user",
-                    "content": """Return the final recon result now.
+                    "content": """现在返回最终 Recon 结果。
 
-Use the canonical JSON schema shown below and do not add extra commentary.
+使用下面的规范 JSON schema，不要添加额外说明。
 ```json
 {
     "project_profile": {"languages": [], "frameworks": [], "databases": [], "package_managers": [], "runtime_indicators": []},

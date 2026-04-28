@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import io
 from pathlib import Path
 import shutil
+import tempfile
+import time
 from types import SimpleNamespace
 import uuid
 import zipfile
@@ -285,6 +288,174 @@ async def test_get_local_directory_project_file_content_returns_text():
 
 
 @pytest.mark.asyncio
+async def test_get_local_directory_project_files_skips_virtualenv_directories():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        db.add(
+            User(
+                id="user-1",
+                email="owner@example.com",
+                hashed_password="not-a-real-hash",
+                full_name="Owner",
+                is_active=True,
+            )
+        )
+        await db.commit()
+
+    managed_root_path = make_managed_root()
+    project_path = managed_root_path / "files-demo"
+    src_dir = project_path / "src"
+    venv_dir = project_path / ".venv" / "lib" / "site-packages"
+    src_dir.mkdir(parents=True)
+    venv_dir.mkdir(parents=True)
+    (src_dir / "app.py").write_text("print('keep me')\n", encoding="utf-8")
+    (venv_dir / "dependency.py").write_text("print('exclude me')\n", encoding="utf-8")
+    original_root = projects_endpoint.settings.MANAGED_PROJECTS_ROOT
+    projects_endpoint.settings.MANAGED_PROJECTS_ROOT = str(managed_root_path)
+
+    async with session_factory() as db:
+        created = await projects_endpoint.create_project(
+            db=db,
+            project_in=projects_endpoint.ProjectCreate(
+                name="Files Demo",
+                source_type="local_directory",
+                local_path=str(project_path),
+                programming_languages=["Python"],
+            ),
+            current_user=SimpleNamespace(id="user-1", is_active=True),
+        )
+
+    app = build_test_app()
+
+    async def override_get_db():
+        async with session_factory() as db:
+            yield db
+
+    async def override_get_current_user():
+        return SimpleNamespace(id="user-1", is_active=True)
+
+    app.dependency_overrides[deps.get_db] = override_get_db
+    app.dependency_overrides[deps.get_current_user] = override_get_current_user
+
+    transport = ASGITransport(app=app)
+    try:
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(f"/api/v1/projects/{created.id}/files")
+    finally:
+        projects_endpoint.settings.MANAGED_PROJECTS_ROOT = original_root
+        shutil.rmtree(managed_root_path, ignore_errors=True)
+
+    await engine.dispose()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["path"] == "src/app.py"
+    assert payload[0]["size"] > 0
+
+
+def test_list_local_project_files_skips_virtualenv_directories():
+    managed_root_path = make_managed_root()
+    project_path = managed_root_path / "exclude-demo"
+    src_dir = project_path / "src"
+    venv_dir = project_path / ".venv" / "lib" / "site-packages"
+    src_dir.mkdir(parents=True)
+    venv_dir.mkdir(parents=True)
+
+    (src_dir / "app.py").write_text("print('keep me')\n", encoding="utf-8")
+    (venv_dir / "dependency.py").write_text("print('exclude me')\n", encoding="utf-8")
+
+    try:
+        files = projects_endpoint._list_local_project_files(project_path)
+    finally:
+        shutil.rmtree(managed_root_path, ignore_errors=True)
+
+    assert [entry["path"] for entry in files] == ["src/app.py"]
+
+
+@pytest.mark.asyncio
+async def test_get_local_directory_project_files_does_not_block_event_loop(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        db.add(
+            User(
+                id="user-1",
+                email="owner@example.com",
+                hashed_password="not-a-real-hash",
+                full_name="Owner",
+                is_active=True,
+            )
+        )
+        await db.commit()
+
+    managed_root_path = make_managed_root()
+    project_path = managed_root_path / "non-blocking-demo"
+    project_path.mkdir(parents=True)
+    (project_path / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    original_root = projects_endpoint.settings.MANAGED_PROJECTS_ROOT
+    projects_endpoint.settings.MANAGED_PROJECTS_ROOT = str(managed_root_path)
+
+    async with session_factory() as db:
+        created = await projects_endpoint.create_project(
+            db=db,
+            project_in=projects_endpoint.ProjectCreate(
+                name="Non Blocking Demo",
+                source_type="local_directory",
+                local_path=str(project_path),
+                programming_languages=["Python"],
+            ),
+            current_user=SimpleNamespace(id="user-1", is_active=True),
+        )
+
+    events: list[str] = []
+
+    def slow_list_local_project_files(project_root: Path, exclude_patterns: list[str] | None = None):
+        del project_root, exclude_patterns
+        time.sleep(0.1)
+        events.append("list_done")
+        return [{"path": "app.py", "size": 15}]
+
+    monkeypatch.setattr(projects_endpoint, "_list_local_project_files", slow_list_local_project_files)
+
+    async with session_factory() as db:
+        listing_task = asyncio.create_task(
+            projects_endpoint.get_project_files(
+                id=created.id,
+                db=db,
+                current_user=SimpleNamespace(id="user-1", is_active=True),
+            )
+        )
+
+        async def observer():
+            await asyncio.sleep(0.01)
+            events.append("tick")
+
+        observer_task = asyncio.create_task(observer())
+        await asyncio.sleep(0.02)
+        interim_events = list(events)
+        files = await listing_task
+        await observer_task
+
+    projects_endpoint.settings.MANAGED_PROJECTS_ROOT = original_root
+    shutil.rmtree(managed_root_path, ignore_errors=True)
+    await engine.dispose()
+
+    assert interim_events == ["tick"]
+    assert files == [{"path": "app.py", "size": 15}]
+    assert events == ["tick", "list_done"]
+
+
+@pytest.mark.asyncio
 async def test_get_local_directory_project_file_content_rejects_path_escape():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -443,6 +614,83 @@ async def test_upload_project_zip_extracts_persistent_source_and_can_skip_archiv
     assert info_response.json()["has_file"] is False
     assert info_response.json()["has_persistent_source"] is True
     assert info_response.json()["persistent_source_path"] == str(Path(project.local_path).resolve())
+
+
+@pytest.mark.asyncio
+async def test_zip_project_file_content_uses_existing_legacy_local_path_when_archive_is_missing():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        db.add(
+            User(
+                id="user-1",
+                email="owner@example.com",
+                hashed_password="not-a-real-hash",
+                full_name="Owner",
+                is_active=True,
+            )
+        )
+        db.add(
+            Project(
+                id="project-zip-legacy-1",
+                name="Legacy Zip Demo",
+                owner_id="user-1",
+                source_type="zip",
+                repository_type="other",
+                default_branch="main",
+            )
+        )
+        await db.commit()
+
+    managed_root = make_managed_root()
+    legacy_root = Path(tempfile.mkdtemp(prefix="auditai-legacy-zip-")).resolve()
+    original_managed_root = projects_endpoint.settings.MANAGED_PROJECTS_ROOT
+    original_zip_root = projects_endpoint.settings.ZIP_STORAGE_PATH
+    projects_endpoint.settings.MANAGED_PROJECTS_ROOT = str(managed_root)
+    projects_endpoint.settings.ZIP_STORAGE_PATH = str(managed_root / "zip-storage")
+
+    try:
+        (legacy_root / "src").mkdir(parents=True, exist_ok=True)
+        (legacy_root / "src" / "Kernel.php").write_text("<?php\nreturn 'legacy zip';\n", encoding="utf-8")
+
+        async with session_factory() as db:
+            project = await db.get(Project, "project-zip-legacy-1")
+            project.local_path = str(legacy_root)
+            await db.commit()
+
+        app = build_test_app()
+
+        async def override_get_db():
+            async with session_factory() as db:
+                yield db
+
+        async def override_get_current_user():
+            return SimpleNamespace(id="user-1", is_active=True)
+
+        app.dependency_overrides[deps.get_db] = override_get_db
+        app.dependency_overrides[deps.get_current_user] = override_get_current_user
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            files_response = await client.get("/api/v1/projects/project-zip-legacy-1/files")
+            preview_response = await client.get(
+                "/api/v1/projects/project-zip-legacy-1/file-content",
+                params={"path": "src/Kernel.php"},
+            )
+    finally:
+        projects_endpoint.settings.MANAGED_PROJECTS_ROOT = original_managed_root
+        projects_endpoint.settings.ZIP_STORAGE_PATH = original_zip_root
+        shutil.rmtree(legacy_root, ignore_errors=True)
+
+    await engine.dispose()
+
+    assert files_response.status_code == 200
+    assert preview_response.status_code == 200
+    assert preview_response.json()["content"] == "<?php\nreturn 'legacy zip';\n"
 
 
 @pytest.mark.asyncio

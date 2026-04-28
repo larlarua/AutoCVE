@@ -118,7 +118,9 @@ export const StatsPanel = memo(function StatsPanel({ task, findings }: StatsPane
     medium: task.medium_count || 0,
     low: task.low_count || 0,
   };
-  const totalFindings = task.findings_count || 0;
+  const finalizedFindings = task.finalized_findings_count ?? task.findings_count ?? 0;
+  const recoveredCandidates = task.recovered_candidates_count ?? 0;
+  const totalFindings = finalizedFindings;
   const progressPercent = task.progress_percentage || 0;
   const topFindings = [...(findings || [])]
     .sort((a, b) => {
@@ -139,6 +141,29 @@ export const StatsPanel = memo(function StatsPanel({ task, findings }: StatsPane
     if (score >= 60) return 'amber';
     return 'rose';
   };
+
+  const outcomeConfig = {
+    finalized: {
+      label: 'Finalized',
+      badgeClass: 'bg-emerald-500/15 text-emerald-700 border border-emerald-500/30',
+      description: 'Runtime ended with explicit finalized findings.',
+    },
+    recovered_only: {
+      label: 'Recovered Only',
+      badgeClass: 'bg-sky-500/15 text-sky-700 border border-sky-500/30',
+      description: 'Only transcript-recovered candidates are available.',
+    },
+    incomplete: {
+      label: 'Incomplete',
+      badgeClass: 'bg-amber-500/15 text-amber-700 border border-amber-500/30',
+      description: 'Runtime stopped without a terminal action or finalized findings.',
+    },
+    none: {
+      label: 'No Findings',
+      badgeClass: 'bg-slate-500/15 text-slate-700 border border-slate-500/30',
+      description: 'No finalized findings or recovered candidates are currently available.',
+    },
+  }[task.finding_outcome || 'none'];
 
   return (
     <div className="space-y-3">
@@ -210,6 +235,43 @@ export const StatsPanel = memo(function StatsPanel({ task, findings }: StatsPane
         </div>
       </div>
 
+      <div className="rounded-lg border border-border/50 bg-card/80 p-4 backdrop-blur-sm">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <div className="rounded-md border border-border/50 bg-muted/40 p-1.5">
+              <Shield className="h-4 w-4 text-primary" />
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-foreground">Finding Outcome</div>
+              <div className="text-xs text-muted-foreground">{outcomeConfig.description}</div>
+            </div>
+          </div>
+          <Badge className={outcomeConfig.badgeClass}>{outcomeConfig.label}</Badge>
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-2.5">
+          <MetricCard
+            icon={<Bug className="w-4 h-4" />}
+            label="Finalized"
+            value={finalizedFindings}
+            colorClass={finalizedFindings > 0 ? "text-rose-500" : "text-muted-foreground"}
+            bgClass={finalizedFindings > 0 ? "border-rose-500/20" : ""}
+          />
+          <MetricCard
+            icon={<AlertTriangle className="w-4 h-4" />}
+            label="Recovered"
+            value={recoveredCandidates}
+            colorClass={recoveredCandidates > 0 ? "text-sky-500" : "text-muted-foreground"}
+            bgClass={recoveredCandidates > 0 ? "border-sky-500/20" : ""}
+          />
+        </div>
+        {task.runtime_completion_mode ? (
+          <div className="mt-3 text-xs text-muted-foreground">
+            Runtime completion mode: <span className="font-mono text-foreground">{task.runtime_completion_mode}</span>
+            {task.handoff_ready ? <span className="ml-2 text-emerald-600">handoff ready</span> : null}
+          </div>
+        ) : null}
+      </div>
+
       {/* Metrics Grid with enhanced styling */}
       <div className="grid grid-cols-2 gap-2.5">
         <MetricCard
@@ -233,7 +295,7 @@ export const StatsPanel = memo(function StatsPanel({ task, findings }: StatsPane
         />
         <MetricCard
           icon={<Bug className="w-4 h-4" />}
-          label="Findings"
+          label="Persisted Findings"
           value={totalFindings}
           colorClass={totalFindings > 0 ? "text-rose-500" : "text-muted-foreground"}
           bgClass={totalFindings > 0 ? "border-rose-500/20" : ""}
@@ -288,7 +350,7 @@ export const StatsPanel = memo(function StatsPanel({ task, findings }: StatsPane
               <div className="p-1.5 rounded-md bg-primary/15 border border-primary/30">
                 <Bug className="w-4 h-4 text-primary" />
               </div>
-              <span className="text-sm text-foreground uppercase tracking-wider font-semibold">Final Vulnerability Report</span>
+              <span className="text-sm text-foreground uppercase tracking-wider font-semibold">Finalized Findings Preview</span>
             </div>
             <div className="space-y-2.5">
               {topFindings.map((finding) => {

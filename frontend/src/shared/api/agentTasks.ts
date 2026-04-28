@@ -66,6 +66,41 @@ export interface AgentTask {
 
   // 閿欒淇℃伅
   error_message: string | null;
+  finding_outcome?: "none" | "finalized" | "recovered_only" | "incomplete";
+  runtime_completion_mode?: string | null;
+  finalized_findings_count?: number;
+  recovered_candidates_count?: number;
+  handoff_ready?: boolean;
+  recovered_candidates?: RecoveredCandidate[];
+}
+
+export interface RecoveredCandidate {
+  title: string;
+  severity: string;
+  vulnerability_type: string;
+  description?: string | null;
+  file_path?: string | null;
+  line_start?: number | null;
+  line_end?: number | null;
+  report_status?: string | null;
+  verdict?: string | null;
+  origin?: string | null;
+  evidence_type?: string | null;
+  not_finalized?: boolean;
+  source?: string | null;
+  sink?: string | null;
+  impact?: string | null;
+  cve_justification?: string | null;
+  verification_notes?: string | null;
+  exploit_chain?: Array<{
+    step?: number;
+    location?: string;
+    description?: string;
+    data_state?: string;
+    bypass_reason?: string;
+  }>;
+  references?: string[];
+  evidence_gaps?: string[];
 }
 
 export interface AgentFinding {
@@ -488,6 +523,5 @@ export async function downloadAgentReport(taskId: string, format: "markdown" | "
   link.parentNode?.removeChild(link);
   window.URL.revokeObjectURL(url);
 }
-
 
 

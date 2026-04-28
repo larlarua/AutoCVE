@@ -1,4 +1,4 @@
-﻿import { useState } from "react";
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeft, ChevronLeft, ChevronRight, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { toast } from "sonner";
@@ -15,6 +15,7 @@ import { ToolTracePanel } from "@/pages/AuditSession/components/ToolTracePanel";
 import { useAuditSession } from "@/pages/AuditSession/hooks/useAuditSession";
 import { useAuditSessionChatStream } from "@/pages/AuditSession/hooks/useAuditSessionChatStream";
 import { useAuditSessionStream } from "@/pages/AuditSession/hooks/useAuditSessionStream";
+import type { AuditSessionMessageMode } from "@/shared/api/auditSessions";
 
 export default function AuditSessionPage() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -28,17 +29,25 @@ export default function AuditSessionPage() {
 
   useAuditSessionStream(() => refresh({ silent: true }), Boolean(sessionId && session?.state === "running" && !isStreaming));
 
-  async function handleSubmit(content: string) {
+  async function handleSubmit(content: string, mode: AuditSessionMessageMode) {
     if (!sessionId) {
       return;
     }
     try {
-      await sendMessage(content);
+      const result = await sendMessage(content, mode);
+      if (mode === "generate_report_and_sync") {
+        const managed = result.synced_managed_vulnerability;
+        if (managed) {
+          toast.success(`Report synced to vulnerability management: ${managed.vulnerability_name}`);
+        } else {
+          toast.success("Report generation flow completed");
+        }
+        return;
+      }
+      toast.success("Follow-up added to session");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Follow-up failed");
-      return;
     }
-    toast.success("Follow-up added to session");
   }
 
   if (loading) {
@@ -65,7 +74,7 @@ export default function AuditSessionPage() {
         <Button asChild variant="outline" className="rounded-full border-[rgba(179,197,186,.8)] bg-white/80 shadow-sm backdrop-blur">
           <Link to="/audit-tasks">
             <ArrowLeft className="mr-2 h-4 w-4" />
-            返回任务列表
+            Back to Tasks
           </Link>
         </Button>
         <Button
@@ -75,12 +84,12 @@ export default function AuditSessionPage() {
           className="rounded-full border-[rgba(179,197,186,.8)] bg-white/80 shadow-sm backdrop-blur"
         >
           {sidebarCollapsed ? <PanelRightOpen className="mr-2 h-4 w-4" /> : <PanelRightClose className="mr-2 h-4 w-4" />}
-          {sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
+          {sidebarCollapsed ? "Show Sidebar" : "Hide Sidebar"}
           {sidebarCollapsed ? <ChevronLeft className="ml-2 h-4 w-4" /> : <ChevronRight className="ml-2 h-4 w-4" />}
         </Button>
       </div>
       <AuditSessionHeader session={session} />
-      <div className={`grid gap-6 ${sidebarCollapsed ? 'xl:grid-cols-1' : 'xl:grid-cols-[minmax(0,1.7fr)_minmax(340px,0.9fr)]'}`}>
+      <div className={`grid gap-6 ${sidebarCollapsed ? "xl:grid-cols-1" : "xl:grid-cols-[minmax(0,1.7fr)_minmax(340px,0.9fr)]"}`}>
         <div className="space-y-6">
           <AuditTimeline
             messages={messages}

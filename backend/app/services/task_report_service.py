@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.agent_task import AgentFinding, AgentTask
 from app.models.project import Project
 from app.models.report_template import AgentTaskReport
+from app.services.finding_runtime.final_finding_contract import filter_meaningful_exploit_chain, has_meaningful_poc
 from app.services.report_template_file_service import ReportTemplateFileService
 
 DEFAULT_REPORT_TEMPLATE = """# AuditAI 最终漏洞报告
@@ -122,13 +123,17 @@ def serialize_finding(finding: AgentFinding | Dict[str, Any]) -> Dict[str, Any]:
         return item
     metadata = finding.finding_metadata or {}
     raw_finding = metadata.get("raw_finding", {}) if isinstance(metadata, dict) else {}
-    poc = {
-        "description": finding.poc_description or raw_finding.get("poc", {}).get("description", ""),
-        "steps": finding.poc_steps or raw_finding.get("poc", {}).get("steps", []),
-        "payload": raw_finding.get("poc", {}).get("payload", ""),
-        "impact": raw_finding.get("poc", {}).get("impact", ""),
-        "cve_justification": raw_finding.get("poc", {}).get("cve_justification", ""),
-    }
+    raw_poc = raw_finding.get("poc", {}) if isinstance(raw_finding, dict) else {}
+    poc = {}
+    if has_meaningful_poc(raw_poc) or finding.poc_description or finding.poc_steps:
+        poc = {
+            "description": finding.poc_description or raw_poc.get("description", ""),
+            "steps": finding.poc_steps or raw_poc.get("steps", []),
+            "payload": raw_poc.get("payload", ""),
+            "impact": raw_poc.get("impact", ""),
+            "cve_justification": raw_poc.get("cve_justification", ""),
+        }
+    exploit_chain = filter_meaningful_exploit_chain(raw_finding.get("exploit_chain", []))
     return {
         "id": finding.id,
         "title": finding.title,
@@ -144,7 +149,7 @@ def serialize_finding(finding: AgentFinding | Dict[str, Any]) -> Dict[str, Any]:
         "confidence": finding.ai_confidence,
         "ai_confidence": finding.ai_confidence,
         "suggestion": finding.suggestion,
-        "has_poc": bool(getattr(finding, "has_poc", False) or raw_finding.get("poc")),
+        "has_poc": bool(getattr(finding, "has_poc", False) or has_meaningful_poc(raw_poc)),
         "poc_code": getattr(finding, "poc_code", None),
         "fix_code": getattr(finding, "fix_code", None),
         "ai_explanation": finding.ai_explanation,
@@ -153,7 +158,7 @@ def serialize_finding(finding: AgentFinding | Dict[str, Any]) -> Dict[str, Any]:
         "source": finding.source,
         "sink": finding.sink,
         "poc": poc,
-        "exploit_chain": raw_finding.get("exploit_chain", []),
+        "exploit_chain": exploit_chain,
         "impact": raw_finding.get("impact", ""),
         "cve_justification": raw_finding.get("cve_justification", ""),
         "verification_notes": raw_finding.get("verification_notes", ""),

@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef } from "react";
+import { useMemo } from "react";
 import { Bot, BrainCircuit, MessageSquareQuote, Square, UserRound, Wrench } from "lucide-react";
 import { marked } from "marked";
 
@@ -26,35 +26,40 @@ function rolePresentation(message: AuditSessionMessage) {
       return {
         label: "提问",
         icon: UserRound,
-        bubble: "ml-auto max-w-[82%] rounded-[26px] rounded-br-md border border-[rgba(120,156,129,.35)] bg-[linear-gradient(135deg,rgba(233,244,235,.96),rgba(212,232,216,.92))] text-slate-900 shadow-[0_18px_40px_rgba(109,141,116,.12)]",
+        bubble:
+          "ml-auto max-w-[82%] rounded-[26px] rounded-br-md border border-[rgba(120,156,129,.35)] bg-[linear-gradient(135deg,rgba(233,244,235,.96),rgba(212,232,216,.92))] text-slate-900 shadow-[0_18px_40px_rgba(109,141,116,.12)]",
         align: "justify-end",
       };
     case "assistant":
       return {
         label: "助手",
         icon: Bot,
-        bubble: "mr-auto max-w-[88%] rounded-[26px] rounded-bl-md border border-[rgba(210,220,214,.9)] bg-white/95 text-slate-900 shadow-[0_28px_60px_rgba(77,102,84,.08)]",
+        bubble:
+          "mr-auto max-w-[88%] rounded-[26px] rounded-bl-md border border-[rgba(210,220,214,.9)] bg-white/95 text-slate-900 shadow-[0_28px_60px_rgba(77,102,84,.08)]",
         align: "justify-start",
       };
     case "tool_use":
       return {
         label: "工具调用",
         icon: Wrench,
-        bubble: "mr-auto max-w-[88%] rounded-[22px] border border-[rgba(237,196,116,.45)] bg-[linear-gradient(135deg,rgba(255,248,233,.95),rgba(252,240,206,.92))] text-amber-950",
+        bubble:
+          "mr-auto max-w-[88%] rounded-[22px] border border-[rgba(237,196,116,.45)] bg-[linear-gradient(135deg,rgba(255,248,233,.95),rgba(252,240,206,.92))] text-amber-950",
         align: "justify-start",
       };
     case "tool_result":
       return {
         label: "工具结果",
         icon: MessageSquareQuote,
-        bubble: "mr-auto max-w-[88%] rounded-[22px] border border-[rgba(139,166,224,.4)] bg-[linear-gradient(135deg,rgba(238,245,255,.96),rgba(222,236,255,.94))] text-slate-900",
+        bubble:
+          "mr-auto max-w-[88%] rounded-[22px] border border-[rgba(139,166,224,.4)] bg-[linear-gradient(135deg,rgba(238,245,255,.96),rgba(222,236,255,.94))] text-slate-900",
         align: "justify-start",
       };
     default:
       return {
         label: message.role,
         icon: BrainCircuit,
-        bubble: "mx-auto max-w-[90%] rounded-[22px] border border-[rgba(210,215,220,.7)] bg-[rgba(248,250,252,.92)] text-slate-700",
+        bubble:
+          "mx-auto max-w-[90%] rounded-[22px] border border-[rgba(210,215,220,.7)] bg-[rgba(248,250,252,.92)] text-slate-700",
         align: "justify-center",
       };
   }
@@ -79,17 +84,7 @@ export function AuditTimeline({
   onStopStreaming?: () => void;
   activeStreamingMessageId?: string | null;
 }) {
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-
   const renderedMessages = useMemo(() => messages, [messages]);
-
-  useEffect(() => {
-    const node = scrollRef.current;
-    if (!node) {
-      return;
-    }
-    node.scrollTop = node.scrollHeight;
-  }, [renderedMessages, isStreaming]);
 
   return (
     <Card className="overflow-hidden rounded-[30px] border border-[rgba(191,208,198,.72)] bg-[linear-gradient(180deg,rgba(255,255,255,.96),rgba(244,249,246,.96))] shadow-[0_28px_90px_rgba(84,110,93,.12)]">
@@ -104,7 +99,12 @@ export function AuditTimeline({
               {isStreaming ? "正在生成回复..." : `共 ${messages.length} 条会话消息`}
             </div>
             {isStreaming && onStopStreaming ? (
-              <Button type="button" onClick={onStopStreaming} variant="outline" className="h-10 rounded-full border-rose-200 bg-rose-50 px-4 text-rose-700 hover:bg-rose-100">
+              <Button
+                type="button"
+                onClick={onStopStreaming}
+                variant="outline"
+                className="h-10 rounded-full border-rose-200 bg-rose-50 px-4 text-rose-700 hover:bg-rose-100"
+              >
                 <Square className="mr-2 h-3.5 w-3.5 fill-current" />
                 停止生成
               </Button>
@@ -115,7 +115,7 @@ export function AuditTimeline({
       <CardContent className="p-0">
         <div className="relative">
           <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(99,125,108,.05)_1px,transparent_1px),linear-gradient(90deg,rgba(99,125,108,.05)_1px,transparent_1px)] bg-[size:28px_28px] opacity-50" />
-          <div ref={scrollRef} className="relative max-h-[72vh] space-y-5 overflow-y-auto px-5 py-6 sm:px-7">
+          <div className="relative max-h-[72vh] space-y-5 overflow-y-auto px-5 py-6 sm:px-7">
             {renderedMessages.length === 0 ? (
               <div className="flex min-h-[320px] items-center justify-center">
                 <div className="max-w-md rounded-[28px] border border-dashed border-[rgba(154,180,163,.45)] bg-white/70 px-8 py-10 text-center shadow-[0_20px_50px_rgba(120,146,126,.07)]">
@@ -128,7 +128,9 @@ export function AuditTimeline({
               renderedMessages.map((message) => {
                 const presentation = rolePresentation(message);
                 const Icon = presentation.icon;
-                const isActiveStreamingAssistant = Boolean(isStreaming && message.id === activeStreamingMessageId && message.role === "assistant");
+                const isActiveStreamingAssistant = Boolean(
+                  isStreaming && message.id === activeStreamingMessageId && message.role === "assistant",
+                );
                 const emptyStreaming = isActiveStreamingAssistant && !message.content.trim();
 
                 return (

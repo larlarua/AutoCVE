@@ -1,98 +1,98 @@
 from __future__ import annotations
 
-NO_TOOLS_PREAMBLE = """CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
+NO_TOOLS_PREAMBLE = """关键要求：只能用文本回复，禁止调用任何工具。
 
-- Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool.
-- You already have all the context you need in the conversation above.
-- Tool calls will be REJECTED and will waste your only turn; you will fail the task.
-- Your entire response must be plain text: an <analysis> block followed by a <summary> block.
-
+- 不要使用 Read、Bash、Grep、Glob、Edit、Write 或任何其他工具。
+- 上方对话已经包含你需要的全部上下文。
+- 工具调用会被拒绝，并浪费你唯一的一轮回复，导致任务失败。
+- 你的完整回复必须是纯文本：先给出一个 <analysis> 块，再给出一个 <summary> 块。
+- 请使用简体中文撰写总结；代码、路径、函数名和协议标签可以保留原文。
 """
 
 NO_TOOLS_TRAILER = """
-Do not call any tools. Return only plain text with one <analysis> block and one <summary> block.
+不要调用任何工具。只返回纯文本，其中包含一个 <analysis> 块和一个 <summary> 块。
 """.lstrip("\n")
 
-_DETAILED_ANALYSIS_INSTRUCTION_BASE = """Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
+_DETAILED_ANALYSIS_INSTRUCTION_BASE = """在提供最终总结前，请用 <analysis> 标签包裹分析过程，以组织思路并确保覆盖所有必要要点。分析过程中：
 
-1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
-   - The user's explicit requests and intents
-   - Your approach to addressing the user's requests
-   - Key decisions, technical concepts and code patterns
-   - Specific details like:
-     - file names
-     - full code snippets
-     - function signatures
-     - file edits
-   - Errors that you ran into and how you fixed them
-   - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
-2. Double-check for technical accuracy and completeness, addressing each required element thoroughly."""
+1. 按时间顺序分析对话中的每条消息和每个部分。对每个部分都要识别：
+   - 用户的明确请求和意图
+   - 你处理用户请求的方法
+   - 关键决策、技术概念和代码模式
+   - 具体细节，例如：
+     - 文件名
+     - 完整代码片段
+     - 函数签名
+     - 文件修改
+   - 遇到的错误以及修复方式
+   - 特别关注收到的用户反馈，尤其是用户要求你改变做法的地方。
+2. 复核技术准确性和完整性，逐项覆盖必要元素。"""
 
-_DETAILED_ANALYSIS_INSTRUCTION_PARTIAL = """Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
+_DETAILED_ANALYSIS_INSTRUCTION_PARTIAL = """在提供最终总结前，请用 <analysis> 标签包裹分析过程，以组织思路并确保覆盖所有必要要点。分析过程中：
 
-1. Analyze the recent messages chronologically. For each section thoroughly identify:
-   - The user's explicit requests and intents
-   - Your approach to addressing the user's requests
-   - Key decisions, technical concepts and code patterns
-   - Specific details like:
-     - file names
-     - full code snippets
-     - function signatures
-     - file edits
-   - Errors that you ran into and how you fixed them
-   - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
-2. Double-check for technical accuracy and completeness, addressing each required element thoroughly."""
+1. 按时间顺序分析最近的消息。对每个部分都要识别：
+   - 用户的明确请求和意图
+   - 你处理用户请求的方法
+   - 关键决策、技术概念和代码模式
+   - 具体细节，例如：
+     - 文件名
+     - 完整代码片段
+     - 函数签名
+     - 文件修改
+   - 遇到的错误以及修复方式
+   - 特别关注收到的用户反馈，尤其是用户要求你改变做法的地方。
+2. 复核技术准确性和完整性，逐项覆盖必要元素。"""
 
-BASE_COMPACT_PROMPT = f"""Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
-This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
+BASE_COMPACT_PROMPT = f"""你的任务是为目前为止的对话创建一份详细总结，重点关注用户的明确请求以及你之前采取的行动。
+总结必须充分捕捉技术细节、代码模式和架构决策，以便后续继续开发时不丢失上下文。
 
 {_DETAILED_ANALYSIS_INSTRUCTION_BASE}
 
-Your summary should include the following sections:
+总结应包含以下部分：
 
-1. Primary Request and Intent
-2. Key Technical Concepts
-3. Files and Code Sections
-4. Errors and fixes
-5. Problem Solving
-6. All user messages
-7. Pending Tasks
-8. Current Work
-9. Optional Next Step
+1. 主要请求和意图
+2. 关键技术概念
+3. 文件和代码位置
+4. 错误和修复
+5. 问题解决过程
+6. 所有用户消息
+7. 待办任务
+8. 当前工作
+9. 可选下一步
 """
 
-PARTIAL_COMPACT_PROMPT = f"""Your task is to create a detailed summary of the RECENT portion of the conversation - the messages that follow earlier retained context. The earlier messages are being kept intact and do NOT need to be summarized. Focus your summary on what was discussed, learned, and accomplished in the recent messages only.
+PARTIAL_COMPACT_PROMPT = f"""你的任务是为对话的最近部分创建详细总结，也就是早先保留上下文之后的新消息。更早的消息会原样保留，不需要总结。请只关注最近消息中讨论、了解到和完成的内容。
 
 {_DETAILED_ANALYSIS_INSTRUCTION_PARTIAL}
 
-Your summary should include the following sections:
+总结应包含以下部分：
 
-1. Primary Request and Intent
-2. Key Technical Concepts
-3. Files and Code Sections
-4. Errors and fixes
-5. Problem Solving
-6. All user messages
-7. Pending Tasks
-8. Current Work
-9. Optional Next Step
+1. 主要请求和意图
+2. 关键技术概念
+3. 文件和代码位置
+4. 错误和修复
+5. 问题解决过程
+6. 所有用户消息
+7. 待办任务
+8. 当前工作
+9. 可选下一步
 """
 
-PARTIAL_COMPACT_UP_TO_PROMPT = f"""Your task is to create a detailed summary of this conversation. This summary will be placed at the start of a continuing session; newer messages that build on this context will follow after your summary (you do not see them here). Summarize thoroughly so that someone reading only your summary and then the newer messages can fully understand what happened and continue the work.
+PARTIAL_COMPACT_UP_TO_PROMPT = f"""你的任务是为这段对话创建详细总结。该总结会放在后续会话的开头；新的消息会接在总结后继续展开（你在这里看不到它们）。请充分总结，使只阅读你的总结和后续新消息的人也能理解发生了什么并继续工作。
 
 {_DETAILED_ANALYSIS_INSTRUCTION_BASE}
 
-Your summary should include the following sections:
+总结应包含以下部分：
 
-1. Primary Request and Intent
-2. Key Technical Concepts
-3. Files and Code Sections
-4. Errors and fixes
-5. Problem Solving
-6. All user messages
-7. Pending Tasks
-8. Work Completed
-9. Context for Continuing Work
+1. 主要请求和意图
+2. 关键技术概念
+3. 文件和代码位置
+4. 错误和修复
+5. 问题解决过程
+6. 所有用户消息
+7. 待办任务
+8. 已完成工作
+9. 继续工作的上下文
 """
 
 
@@ -110,10 +110,11 @@ def build_compaction_prompt(*, mode: str, custom_instructions: str | None = None
     instructions_block = ""
     if custom_instructions:
         instructions_block = (
-            "\n\nAdditional summarization instructions:\n"
+            "\n\n额外总结要求：\n"
             f"{custom_instructions.strip()}\n"
         )
     return f"{NO_TOOLS_PREAMBLE}{prompt_body}{instructions_block}\n{NO_TOOLS_TRAILER}"
+
 
 def format_compact_summary(summary: str) -> str:
     text = str(summary or "").strip()
@@ -130,7 +131,7 @@ def get_compact_user_summary_message(summary: str, suppress_follow_up_questions:
     formatted = format_compact_summary(summary)
     lines = [formatted]
     if transcript_path:
-        lines.append(f"Transcript reference: {transcript_path}")
+        lines.append(f"转录引用：{transcript_path}")
     if not suppress_follow_up_questions:
-        lines.append("Follow-up questions may still be needed for unresolved gaps.")
+        lines.append("对于尚未解决的缺口，后续可能仍需提问。")
     return "\n\n".join(line for line in lines if line)

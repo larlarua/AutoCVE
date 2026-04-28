@@ -43,8 +43,8 @@ class InvokeSkillInput(BaseModel):
 class RuntimeSkillTool(RuntimeTool):
     name = "Skill"
     description = (
-        "Load a matched SKILL.md body or a concrete skill resource from the local skill library. "
-        "Use this when the skill briefing tells you to open the primary audit skill or a referenced guide."
+        "从本地技能库加载匹配的 SKILL.md 正文或具体技能资源。"
+        "当技能简报要求打开主审计技能或引用指南时使用。"
     )
     input_model = InvokeSkillInput
 

@@ -673,16 +673,16 @@ class AnalysisWorkflowAgent(BaseAgent):
     def _build_summary_prompt(self) -> str:
         schema = SCAN_OUTPUT_SCHEMA if self.output_key == "raw_findings" else FINDING_OUTPUT_SCHEMA
         return (
-            "Stop using tools now. Based only on the code and observations already collected, "
-            "return a compliant Final Answer immediately. Do not emit another Action.\n"
-            f"Use this schema:\n{schema}\n"
-            "Return either 'Final Answer: {...}' or pure JSON matching the schema."
+            "现在停止使用工具。只基于已经收集到的代码和观察结果，"
+            "立即返回符合要求的 Final Answer，不要再输出 Action。\n"
+            f"使用这个 schema：\n{schema}\n"
+            "只能返回 'Final Answer: {...}' 或匹配 schema 的纯 JSON。"
         )
 
     def _build_fallback_result(self) -> Dict[str, Any]:
         return {
             self.output_key: [],
-            "summary": f"{self.name} completed {len(self._steps)} reasoning steps but did not produce a compliant Final Answer.",
+            "summary": f"{self.name} 已完成 {len(self._steps)} 轮推理，但没有产出符合要求的 Final Answer。",
         }
 
     async def _recover_final_result(self) -> Dict[str, Any]:
@@ -944,7 +944,7 @@ class AnalysisWorkflowAgent(BaseAgent):
                     if empty_response_count >= 3:
                         final_result = self._build_fallback_result()
                         break
-                    self._conversation_history.append({"role": "user", "content": "Return a valid Thought/Action or Final Answer."})
+                    self._conversation_history.append({"role": "user", "content": "请返回有效的 Thought/Action 或 Final Answer。"})
                     continue
                 empty_response_count = 0
 
@@ -984,7 +984,7 @@ class AnalysisWorkflowAgent(BaseAgent):
                     )
                     self._on_observation_turn(observation, step)
                 else:
-                    await self.emit_llm_decision("continue", "Need a concrete action or final answer")
+                    await self.emit_llm_decision("continue", "需要具体 Action 或 Final Answer")
                     self._conversation_history.append({"role": "user", "content": self._build_no_action_prompt()})
 
             if not final_result.get(self.output_key) and not final_result.get("summary") and not self.is_cancelled:
@@ -1006,8 +1006,8 @@ class AnalysisWorkflowAgent(BaseAgent):
                     if not final_result.get(self.output_key):
                         self._conversation_history.append({
                             "role": "user",
-                            "content": "Last chance. No more tools. Return JSON only with the best supported findings from prior observations. "
-                                       "If evidence is incomplete but still actionable, keep verdict='candidate' and explain the gap in verification_notes.",
+                            "content": "最后一次机会。不要再使用工具。只返回 JSON，并包含先前观察中证据最充分的发现。"
+                                       "如果证据不完整但仍可行动，请保持 verdict='candidate'，并在 verification_notes 中说明缺口。",
                         })
                         strict_output, _ = await self.stream_llm_call(self._conversation_history)
                         if strict_output and strict_output.strip():

@@ -14,11 +14,11 @@ class TodoWriteInput(BaseModel):
 
 class TodoWriteRuntimeTool(RuntimeTool):
     name = "TodoWrite"
-    description = "Create a runtime todo item for the current agent"
+    description = "为当前 Agent 创建运行时待办项"
     input_model = TodoWriteInput
     should_defer = True
     always_load = True
-    search_hint = "record a todo or plan step"
+    search_hint = "记录待办或计划步骤"
 
     def __init__(self, session_store):
         super().__init__()

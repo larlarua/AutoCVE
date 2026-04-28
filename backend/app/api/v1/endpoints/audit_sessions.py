@@ -10,14 +10,15 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.api import deps
 from app.core.config import settings
 from app.core.encryption import decrypt_sensitive_data
 from app.db.session import get_db
-from app.models.agent_task import AgentTask
+from app.models.agent_task import AgentFinding, AgentTask, FindingStatus
 from app.models.audit_session import (
     AuditHandoff,
     AuditMemory,
@@ -28,7 +29,9 @@ from app.models.audit_session import (
     AuditSkillInvocation,
     AuditToolCall,
 )
+from app.models.managed_vulnerability import ManagedVulnerability
 from app.models.project import Project
+from app.schemas.managed_vulnerability import ManagedVulnerabilityDetailResponse
 from app.models.user import User
 from app.services.agent.tools.sandbox_tool import SandboxManager
 from app.services.finding_runtime.bridge import FindingRuntimeBridge
@@ -65,6 +68,11 @@ class AuditSessionMessageResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class AuditSessionMessageMutationResponse(AuditSessionMessageResponse):
+    mode: str = "chat"
+    synced_managed_vulnerability: ManagedVulnerabilityDetailResponse | None = None
 
 
 class AuditSessionToolCallResponse(BaseModel):
@@ -145,6 +153,7 @@ class AuditSessionHandoffResponse(BaseModel):
 
 class AuditSessionMessageCreate(BaseModel):
     content: str
+    mode: str = "chat"
 
 
 def _format_sse_event(payload: dict[str, Any]) -> str:
@@ -168,6 +177,18 @@ def _to_message_response(message: AuditSessionMessage) -> AuditSessionMessageRes
         payload=dict(message.payload or {}),
         created_at=message.created_at,
     )
+
+
+def _to_message_mutation_response(
+    message: AuditSessionMessage,
+    *,
+    mode: str,
+    synced_managed_vulnerability: ManagedVulnerability | None = None,
+) -> AuditSessionMessageMutationResponse:
+    payload = _to_message_response(message).model_dump(mode="python")
+    payload["mode"] = mode
+    payload["synced_managed_vulnerability"] = synced_managed_vulnerability
+    return AuditSessionMessageMutationResponse.model_validate(payload)
 
 
 def _to_session_response(session: AuditSession) -> AuditSessionResponse:
@@ -325,6 +346,82 @@ async def continue_runtime_session(*, session_id: str, content: str, db: AsyncSe
             await sandbox_manager.cleanup()
         except Exception:
             pass
+
+
+async def _generate_and_sync_follow_up_managed_vulnerability(
+    *,
+    session: AuditSession,
+    db: AsyncSession,
+) -> ManagedVulnerability:
+    if not session.task_id:
+        raise ValueError("This audit session is not attached to an agent task.")
+
+    task = await db.get(AgentTask, session.task_id)
+    if task is None:
+        raise ValueError("Unable to load the task for this audit session.")
+
+    finding_result = await db.execute(
+        select(AgentFinding)
+        .where(
+            AgentFinding.task_id == task.id,
+            AgentFinding.status != FindingStatus.FALSE_POSITIVE,
+        )
+        .order_by(
+            desc(AgentFinding.is_verified),
+            desc(AgentFinding.verified_at),
+            desc(AgentFinding.created_at),
+            desc(AgentFinding.id),
+        )
+        .limit(1)
+    )
+    finding = finding_result.scalars().first()
+    if finding is None:
+        raise ValueError("No non-false-positive findings are available for report sync yet.")
+
+    from app.api.v1.endpoints.agent_tasks import (
+        _append_internal_audit_session_message,
+        _generate_managed_report_bundle_from_session,
+        _managed_reports_completed,
+    )
+    from app.services.managed_vulnerability_service import ManagedVulnerabilityService
+    from app.services.vulnerability_report_generation import VulnerabilityReportGenerationService
+
+    managed_service = ManagedVulnerabilityService(db)
+    report_service = VulnerabilityReportGenerationService()
+    managed = await managed_service.create_from_finding(task=task, finding=finding)
+
+    if not _managed_reports_completed(managed):
+        prompt = report_service.build_generation_prompt(vulnerability=managed)
+        await _append_internal_audit_session_message(
+            db,
+            session_id=session.id,
+            role="user",
+            content=prompt,
+            name="managed_report_generator",
+            metadata={
+                "kind": "internal_managed_report_request",
+                "finding_id": finding.id,
+                "managed_vulnerability_id": managed.id,
+            },
+        )
+        generated_bundle = await _generate_managed_report_bundle_from_session(
+            db,
+            session=session,
+            task=task,
+            finding=finding,
+            managed_vulnerability=managed,
+            report_service=report_service,
+        )
+        report_service.apply_generated_reports(vulnerability=managed, result=generated_bundle)
+
+    await db.commit()
+    result = await db.execute(
+        select(ManagedVulnerability)
+        .options(selectinload(ManagedVulnerability.reports))
+        .where(ManagedVulnerability.id == managed.id)
+    )
+    refreshed = result.scalar_one()
+    return refreshed
 
 
 async def _build_follow_up_llm_service(*, session: AuditSession, db: AsyncSession) -> tuple[LLMService, AgentTask]:
@@ -499,16 +596,21 @@ async def list_audit_session_handoffs(
     return [AuditSessionHandoffResponse.model_validate(handoff) for handoff in result.scalars().all()]
 
 
-@router.post("/{session_id}/messages", response_model=AuditSessionMessageResponse)
+@router.post("/{session_id}/messages", response_model=AuditSessionMessageMutationResponse)
 async def create_audit_session_message(
     session_id: str,
     payload: AuditSessionMessageCreate,
     db: AsyncSession = Depends(get_db),
     _: User = Depends(deps.get_current_user),
-) -> AuditSessionMessageResponse:
+) -> AuditSessionMessageMutationResponse:
     session = await db.get(AuditSession, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Audit session not found")
+    mode = str(payload.mode or "chat").strip() or "chat"
+    if mode not in {"chat", "generate_report_and_sync"}:
+        raise HTTPException(status_code=400, detail="Unsupported audit session message mode")
+    if mode == "generate_report_and_sync" and session.runtime_stack != "runtime":
+        raise HTTPException(status_code=400, detail="Report generation and sync is only supported for runtime audit sessions")
 
     next_sequence = await db.scalar(
         select(func.max(AuditSessionMessage.sequence)).where(AuditSessionMessage.session_id == session_id)
@@ -518,17 +620,37 @@ async def create_audit_session_message(
         sequence=(next_sequence or 0) + 1,
         role="user",
         content=payload.content,
-        message_metadata={"kind": "follow_up_user_message"} if session.runtime_stack == "runtime" else {},
-        payload={"continued": session.runtime_stack == "runtime"} if session.runtime_stack == "runtime" else {},
+        message_metadata=(
+            {"kind": "follow_up_user_message", "mode": mode}
+            if session.runtime_stack == "runtime"
+            else {"mode": mode}
+        ),
+        payload=(
+            {"continued": session.runtime_stack == "runtime", "mode": mode}
+            if session.runtime_stack == "runtime"
+            else {"mode": mode}
+        ),
     )
     db.add(message)
     await db.commit()
     await db.refresh(message)
 
+    synced_managed_vulnerability: ManagedVulnerability | None = None
     if session.runtime_stack == "runtime":
-        await continue_runtime_session(session_id=session_id, content=payload.content, db=db)
+        if mode == "generate_report_and_sync":
+            try:
+                synced_managed_vulnerability = await _generate_and_sync_follow_up_managed_vulnerability(session=session, db=db)
+            except ValueError as exc:
+                await db.rollback()
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        else:
+            await continue_runtime_session(session_id=session_id, content=payload.content, db=db)
 
-    return _to_message_response(message)
+    return _to_message_mutation_response(
+        message,
+        mode=mode,
+        synced_managed_vulnerability=synced_managed_vulnerability,
+    )
 
 
 @router.post("/{session_id}/messages/stream")
@@ -541,6 +663,11 @@ async def stream_audit_session_message(
     session = await db.get(AuditSession, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Audit session not found")
+    mode = str(payload.mode or "chat").strip() or "chat"
+    if mode not in {"chat", "generate_report_and_sync"}:
+        raise HTTPException(status_code=400, detail="Unsupported audit session message mode")
+    if mode == "generate_report_and_sync" and session.runtime_stack != "runtime":
+        raise HTTPException(status_code=400, detail="Report generation and sync is only supported for runtime audit sessions")
 
     next_sequence = await db.scalar(
         select(func.max(AuditSessionMessage.sequence)).where(AuditSessionMessage.session_id == session_id)
@@ -550,8 +677,8 @@ async def stream_audit_session_message(
         sequence=(next_sequence or 0) + 1,
         role="user",
         content=payload.content,
-        message_metadata={"kind": "follow_up_user_message", "streaming": True},
-        payload={"continued": True, "streaming": True},
+        message_metadata={"kind": "follow_up_user_message", "streaming": True, "mode": mode},
+        payload={"continued": True, "streaming": True, "mode": mode},
     )
     db.add(user_message)
     await db.commit()
@@ -564,14 +691,25 @@ async def stream_audit_session_message(
                 "message": _to_message_response(user_message).model_dump(mode="json"),
             })
             try:
-                await continue_runtime_session(session_id=session_id, content=payload.content, db=db)
+                synced_managed_vulnerability = None
+                if mode == "generate_report_and_sync":
+                    synced_managed_vulnerability = await _generate_and_sync_follow_up_managed_vulnerability(session=session, db=db)
+                else:
+                    await continue_runtime_session(session_id=session_id, content=payload.content, db=db)
                 yield _format_sse_event({
                     "type": "done",
                     "usage": {},
+                    "mode": mode,
+                    "synced_managed_vulnerability": (
+                        ManagedVulnerabilityDetailResponse.model_validate(synced_managed_vulnerability).model_dump(mode="json")
+                        if synced_managed_vulnerability is not None
+                        else None
+                    ),
                 })
             except Exception as exc:
                 await db.rollback()
-                yield _format_sse_event({"type": "error", "message": str(exc)})
+                error_message = str(exc)
+                yield _format_sse_event({"type": "error", "message": error_message, "message_text": error_message})
 
         return StreamingResponse(
             runtime_event_generator(),

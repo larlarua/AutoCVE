@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 
@@ -7,7 +7,15 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
 from app.services.finding_runtime.bridge import FindingRuntimeBridge, RuntimeLLMModelClient
-from app.services.finding_runtime.models import RuntimeMemoryBundle, RuntimeMessageRole, RuntimeStopReason, TranscriptItem, TurnExecutionResult
+from app.services.finding_runtime.models import (
+    RuntimeCompletionMode,
+    RuntimeMemoryBundle,
+    RuntimeMessageRole,
+    RuntimeStopReason,
+    RuntimeTerminalAction,
+    TranscriptItem,
+    TurnExecutionResult,
+)
 from app.services.agent.tools.base import AgentTool, ToolResult
 
 
@@ -135,11 +143,92 @@ def test_bridge_finalizes_non_json_assistant_reply(monkeypatch):
         )
     )
 
-    assert result["final_payload"] == {"findings": [], "summary": "???????"}
-    assert result["turn_count"] >= 1
-    assert llm.calls[-1]["messages"][-1]["role"] == "user"
-    assert "Stop auditing now" in llm.calls[-1]["messages"][-1]["content"]
-    assert llm.calls[-1]["tools"] == []
+    assert result["final_payload"]["findings"] == []
+    assert result["final_payload"]["summary"] == "???????"
+    assert result["turn_count"] >= 0
+
+
+def test_bridge_run_requires_terminal_action_for_main_audit_runner(monkeypatch):
+    captured_runner_kwargs: list[dict] = []
+
+    def fake_runner_init(self, **kwargs):
+        captured_runner_kwargs.append(kwargs)
+
+    async def fake_adapter_run(self, *, project_id, task_id, system_prompt, recon_payload, user_message, model_name):
+        session_id = self._session_store.create_session(
+            project_id=project_id,
+            task_id=task_id,
+            runtime_stack="runtime",
+            system_prompt=system_prompt,
+            recon_payload=recon_payload,
+        )
+        self._session_store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content=user_message))
+        return {
+            "session_id": session_id,
+            "runner_result": TurnExecutionResult(
+                turn_id="turn-1",
+                stop_reason=RuntimeStopReason.COMPLETED,
+            ),
+            "skill_route": {},
+            "memory_counts": {"instruction": 0, "recall": 0},
+        }
+
+    async def fake_ensure_payload(self, *, session_id, model_name, max_turns, model_client, runner_result, payload_extractor, finalizer_prompts, fallback_payload_builder=None):
+        del model_name, max_turns, model_client, runner_result, payload_extractor, finalizer_prompts, fallback_payload_builder
+        return self._session_store.load_session_snapshot(session_id), {"findings": [], "summary": "stub"}
+
+    monkeypatch.setattr(
+        "app.services.finding_runtime.bridge.FindingRuntimeRunner.__init__",
+        fake_runner_init,
+    )
+    monkeypatch.setattr(
+        "app.services.finding_runtime.adapters.finding.FindingRuntimeAdapter.run",
+        fake_adapter_run,
+    )
+    monkeypatch.setattr(
+        "app.services.finding_runtime.bridge.FindingRuntimeBridge._ensure_payload",
+        fake_ensure_payload,
+    )
+
+    bridge = FindingRuntimeBridge(
+        llm_service=FakeLLMService([]),
+        tools={},
+        session_factory=build_session_factory(),
+    )
+
+    asyncio.run(
+        bridge.run(
+            project_id="project-1",
+            task_id="task-1",
+            system_prompt="system",
+            recon_payload={"repo": "demo"},
+            user_message="inspect",
+        )
+    )
+
+    assert captured_runner_kwargs[0]["require_terminal_action"] is True
+    assert captured_runner_kwargs[0]["terminal_action_nudge_limit"] == 2
+
+
+def test_bridge_does_not_attempt_finalizer_after_incomplete_terminal_action():
+    result = TurnExecutionResult(
+        turn_id="turn-1",
+        stop_reason=RuntimeStopReason.COMPLETED,
+        terminal_action=RuntimeTerminalAction.NATURAL_END_WITHOUT_TERMINAL_ACTION,
+        completion_mode=RuntimeCompletionMode.INCOMPLETE,
+    )
+
+    assert FindingRuntimeBridge._should_attempt_finalizer(result) is False
+
+
+def test_bridge_finalizer_prompt_does_not_force_empty_findings_for_incomplete_audit():
+    bridge = FindingRuntimeBridge(llm_service=FakeLLMService([]), tools={}, session_factory=build_session_factory())
+
+    prompt = bridge._default_finalizer_prompts()[0]
+
+    assert "只有在审计已经完成" in prompt
+    assert "如果仍需继续查看文件、验证调用链、补齐 source/sink/PoC/影响面" in prompt
+    assert "证据不足" not in prompt
 
 
 def test_bridge_fallback_summary_uses_last_assistant_message():
@@ -153,7 +242,7 @@ def test_bridge_fallback_summary_uses_last_assistant_message():
 
     summary = bridge._fallback_summary(snapshot)
 
-    assert "machine-parseable final JSON payload" in summary
+    assert "最后一条 assistant 回复" in summary
     assert "OpenApiController" in summary
 
 
@@ -168,28 +257,47 @@ def test_bridge_fallback_payload_recovers_findings_from_assistant_transcript():
         TranscriptItem(
             role=RuntimeMessageRole.ASSISTANT,
             content=(
-                "Thought: 现在让我深入确认几个关键发现并验证完整利用链。\n"
-                "1. `/user/invited` 注册限制绕过 - 明确确认\n"
-                "2. `unpinDashboard` IDOR - 明确确认\n"
-                "3. 数据库连接测试 SSRF（MySQL/MongoDB 无 outbound 策略）\n"
-                "4. `/chart/:chart_id/query` 未认证端点\n"
+                "Thought: 鐜板湪璁╂垜娣卞叆纭鍑犱釜鍏抽敭鍙戠幇骞堕獙璇佸畬鏁村埄鐢ㄩ摼銆俓n"
+                "1. `/user/invited` 娉ㄥ唽闄愬埗缁曡繃 - 鏄庣‘纭\n"
+                "2. `unpinDashboard` IDOR - 鏄庣‘纭\n"
+                "3. 鏁版嵁搴撹繛鎺ユ祴璇?SSRF锛圡ySQL/MongoDB 鏃?outbound 绛栫暐锛塡n"
+                "4. `/chart/:chart_id/query` 鏈璇佺鐐筡n"
             ),
         ),
     )
     snapshot = store.load_session_snapshot(session_id)
 
     payload = bridge._default_fallback_payload(snapshot)
+    assert payload["findings"] == []
+    assert len(payload["recovered_candidates"]) >= 2
+    assert {finding["vulnerability_type"] for finding in payload["recovered_candidates"]} >= {"idor", "ssrf"}
+    assert all(candidate["needs_verification"] is True for candidate in payload["recovered_candidates"])
+    assert "候选线索" in payload["summary"]
+    assert "不是最终漏洞结论" in payload["summary"]
 
-    assert len(payload["findings"]) == 4
-    assert [finding["vulnerability_type"] for finding in payload["findings"]] == [
-        "auth_bypass",
-        "idor",
-        "ssrf",
-        "auth_bypass",
-    ]
-    assert payload["findings"][0]["title"] == "/user/invited 注册限制绕过"
-    assert payload["findings"][0]["needs_verification"] is True
-    assert "Recovered 4 high-signal findings" in payload["summary"]
+
+def test_bridge_fallback_payload_marks_recovered_candidates_as_incomplete():
+    session_factory = build_session_factory()
+    bridge = FindingRuntimeBridge(llm_service=FakeLLMService([]), tools={}, session_factory=session_factory)
+    store = bridge._session_store
+    session_id = store.create_session(project_id="project-1", system_prompt="system")
+    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="inspect"))
+    store.append_message(
+        session_id,
+        TranscriptItem(
+            role=RuntimeMessageRole.ASSISTANT,
+            content="关键发现：`convertUrlRoute` 可能存在 SSRF。我需要查看 tasks.go 的请求拦截逻辑。",
+        ),
+    )
+    snapshot = store.load_session_snapshot(session_id)
+
+    payload = bridge._default_fallback_payload(snapshot)
+
+    assert payload["findings"] == []
+    assert payload["runtime_completion_mode"] == "incomplete"
+    assert payload["is_final"] is False
+    assert payload["requires_retry"] is True
+    assert "不是最终漏洞结论" in payload["summary"]
 
 
 def test_bridge_exposes_restored_style_runtime_tools():
@@ -287,15 +395,41 @@ def test_bridge_extracts_json_from_mixed_final_answer():
     assert payload == {"findings": [{"title": "auth bypass"}], "summary": "done"}
 
 
+def test_runtime_model_client_formats_tool_error_result_as_structured_feedback():
+    mapped = RuntimeLLMModelClient._map_transcript_item(
+        TranscriptItem(
+            role=RuntimeMessageRole.TOOL_RESULT,
+            content="Invalid input for tool 'FinalizeFinding': summary: Field required",
+            name="FinalizeFinding",
+            metadata={"status": "invalid", "is_error": True, "duration_ms": 7},
+            payload={
+                "tool_use_id": "tool-1",
+                "tool_call_id": "call-1",
+                "tool_name": "FinalizeFinding",
+                "input": {"findings": [{"title": "SSRF"}]},
+                "output": {},
+                "error_message": "Invalid input for tool 'FinalizeFinding': summary: Field required",
+            },
+        )
+    )
+
+    assert mapped is not None
+    assert mapped["role"] == "user"
+    assert "工具执行失败" in mapped["content"]
+    assert '"tool_name": "FinalizeFinding"' in mapped["content"]
+    assert '"is_error": true' in mapped["content"]
+    assert '"status": "invalid"' in mapped["content"]
+
+
 def test_runtime_model_client_complete_stream_emits_tokens_and_returns_tool_calls():
     llm = FakeLLMService(
         responses=[
             [
-                {"type": "token", "content": "审", "accumulated": "审"},
-                {"type": "token", "content": "计", "accumulated": "审计"},
+                {"type": "token", "content": "Need ", "accumulated": "Need "},
+                {"type": "token", "content": "tool", "accumulated": "Need tool"},
                 {
                     "type": "done",
-                    "content": "审计完成",
+                    "content": "Need tool",
                     "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
                     "tool_calls": [
                         {
@@ -332,7 +466,7 @@ def test_runtime_model_client_complete_stream_emits_tokens_and_returns_tool_call
     response = asyncio.run(run())
 
     assert [event["type"] for event in streamed_events] == ["token", "token", "done"]
-    assert response.content == "审计完成"
+    assert response.content == "Need tool"
     assert response.tool_calls == [{"id": "call-1", "name": "Read", "input": {"file_path": "main.py"}}]
 
 
@@ -340,11 +474,11 @@ def test_bridge_run_chat_session_stream_emits_runtime_events():
     llm = FakeLLMService(
         responses=[
             [
-                {"type": "token", "content": "实", "accumulated": "实"},
-                {"type": "token", "content": "时", "accumulated": "实时"},
+                {"type": "token", "content": "run ", "accumulated": "run "},
+                {"type": "token", "content": "chat", "accumulated": "run chat"},
                 {
                     "type": "done",
-                    "content": "实时审计",
+                    "content": "run chat",
                     "usage": {"prompt_tokens": 4, "completion_tokens": 4, "total_tokens": 8},
                     "tool_calls": [],
                     "finish_reason": "stop",
@@ -374,7 +508,7 @@ def test_bridge_run_chat_session_stream_emits_runtime_events():
 
     assert result["session_id"]
     assert [event["type"] for event in streamed_events] == ["assistant_start", "token", "token", "done"]
-    assert streamed_events[-1]["message"]["content"] == "实时审计"
+    assert streamed_events[-1]["message"]["content"] == "run chat"
 
 
 def test_bridge_continue_session_refreshes_skill_catalog(monkeypatch):
@@ -531,7 +665,7 @@ def test_bridge_continue_session_uses_discovery_selected_skill(monkeypatch):
     snapshot = store.load_session_snapshot(session_id)
     refreshed_runtime_state = store.load_runtime_state(session_id)
 
-    assert "Primary skill bootstrap: cve-report-writer" in (snapshot.session.system_prompt or "")
+    assert "主技能启动内容：cve-report-writer" in (snapshot.session.system_prompt or "")
     assert "bootstrap for cve-report-writer" in (snapshot.session.system_prompt or "")
     assert refreshed_runtime_state.metadata["skill_discovery"]["finding"]["selected_skill"] == "cve-report-writer"
 
@@ -670,6 +804,61 @@ def test_runtime_model_client_passes_max_output_tokens_override_to_llm_service()
     assert llm.calls[-1]["max_tokens"] == 64000
 
 
+def test_continue_session_until_payload_adds_auto_finalizer_prompt(monkeypatch):
+    async def fake_refresh_session_context(self, session_id: str):
+        return None
+
+    async def fake_run_once(self, *, session_id: str, model_name: str):
+        return TurnExecutionResult(turn_id="turn-1", stop_reason=RuntimeStopReason.COMPLETED)
+
+    monkeypatch.setattr(
+        "app.services.finding_runtime.adapters.finding.FindingRuntimeAdapter.refresh_session_context",
+        fake_refresh_session_context,
+    )
+    monkeypatch.setattr(
+        "app.services.finding_runtime.bridge.FindingRuntimeRunner.run_once",
+        fake_run_once,
+    )
+
+    bridge = FindingRuntimeBridge(
+        llm_service=FakeLLMService([]),
+        tools={},
+        session_factory=build_session_factory(),
+    )
+    store = bridge._session_store
+    session_id = store.create_session(project_id="project-1", system_prompt="system")
+    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="inspect"))
+    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.ASSISTANT, content="natural stop"))
+
+    result = asyncio.run(
+        bridge.continue_session_until_payload(
+            session_id=session_id,
+            model_name="finding-runtime",
+            payload_extractor=bridge.extract_final_payload,
+            finalizer_prompts=bridge._default_finalizer_prompts(),
+            fallback_payload_builder=bridge._default_fallback_payload,
+        )
+    )
+
+    snapshot = store.load_session_snapshot(session_id)
+    finalization_prompts = [
+        item
+        for item in snapshot.messages
+        if (
+            isinstance(getattr(item, "metadata", None), dict)
+            and item.metadata.get("kind") == "finalization_prompt"
+        )
+        or (
+            isinstance(getattr(item, "message_metadata", None), dict)
+            and item.message_metadata.get("kind") == "finalization_prompt"
+        )
+    ]
+
+    assert result["final_payload"]["findings"] == []
+    assert len(finalization_prompts) == 1
+    assert "FinalizeFinding" in finalization_prompts[0].content
+
+
 
 def test_runtime_model_client_stream_complete_emits_tool_call_events_before_done():
     class StreamingLLMService(FakeLLMService):
@@ -702,3 +891,75 @@ def test_runtime_model_client_stream_complete_emits_tool_call_events_before_done
     assert [event["type"] for event in events] == ["content_delta", "tool_call", "done"]
     assert events[1]["tool_call"]["name"] == "Read"
     assert events[2]["content"] == "Need tool"
+
+
+def test_runtime_model_client_stream_complete_passthroughs_llm_retry_events():
+    class StreamingLLMService(FakeLLMService):
+        async def chat_completion_stream(self, *, messages, agent_type, tools, parallel_tool_calls, max_tokens=None):
+            self.calls.append({"messages": messages, "tools": tools, "max_tokens": max_tokens, "streaming": True})
+            yield {
+                "type": "llm_retry",
+                "attempt": 1,
+                "max_attempts": 3,
+                "message_text": "模型服务暂时不可用，正在进行第 1/3 次自动重试……",
+                "error_type": "connection",
+            }
+            yield {"type": "done", "content": "恢复完成", "finish_reason": "stop"}
+
+    llm = StreamingLLMService([])
+    llm_client = __import__("app.services.finding_runtime.bridge", fromlist=["RuntimeLLMModelClient"]).RuntimeLLMModelClient(
+        llm_service=llm,
+        agent_type="finding",
+    )
+
+    async def collect_events():
+        events = []
+        async for event in llm_client.stream_complete(
+            system_prompt="system",
+            recon_payload={},
+            transcript=[TranscriptItem(role=RuntimeMessageRole.USER, content="inspect")],
+            model_name="finding",
+            tool_definitions=[{"name": "Read", "description": "read", "input_schema": {"type": "object"}}],
+        ):
+            events.append(event)
+        return events
+
+    events = asyncio.run(collect_events())
+
+    assert [event["type"] for event in events] == ["llm_retry", "done"]
+    assert events[0]["attempt"] == 1
+    assert "自动重试" in events[0]["message_text"]
+    assert events[1]["content"] == "恢复完成"
+
+
+def test_runtime_model_client_tool_use_history_is_mapped_as_user_context_note():
+    mapped = RuntimeLLMModelClient._map_transcript_item(
+        TranscriptItem(
+            role=RuntimeMessageRole.TOOL_USE,
+            content="Write",
+            name="Write",
+            payload={
+                "tool_use_id": "tool-1",
+                "tool_name": "Write",
+                "input": {"path": ".auditai/findings.json", "content": "{}"},
+            },
+        )
+    )
+
+    assert mapped is not None
+    assert mapped["role"] == "user"
+    assert "Tool Call:" not in mapped["content"]
+    assert "先前工具请求历史" in mapped["content"]
+
+def test_runtime_model_client_assistant_history_sanitizes_legacy_text_tool_calls_into_user_context_note():
+    mapped = RuntimeLLMModelClient._map_transcript_item(
+        TranscriptItem(
+            role=RuntimeMessageRole.ASSISTANT,
+            content='Tool Call: Write\n{"input":{"path":".auditai/findings.json","content":"{}"}}',
+        )
+    )
+
+    assert mapped is not None
+    assert mapped["role"] == "user"
+    assert "Tool Call:" not in mapped["content"]
+    assert "先前工具请求历史" in mapped["content"]

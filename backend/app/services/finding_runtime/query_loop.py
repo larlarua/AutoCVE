@@ -8,10 +8,12 @@ from datetime import datetime, timezone
 from app.models.audit_session import AuditCheckpointType
 from app.services.agent.json_parser import AgentJsonParser
 from app.services.finding_runtime.models import (
+    RuntimeCompletionMode,
     RuntimeContinueReason,
     RuntimeMessageRole,
     RuntimeModelResponse,
     RuntimeStopReason,
+    RuntimeTerminalAction,
     ToolCallRequest,
     TranscriptItem,
     TurnExecutionResult,
@@ -55,12 +57,49 @@ from app.services.finding_runtime.query_transitions import (
 
 
 class QueryLoop:
-    def __init__(self, *, session_store, model_client, tool_registry=None, tool_orchestrator=None, event_sink=None):
+    ALLOW_LEGACY_TEXT_TOOL_CALLS = False
+    _CONTINUE_INTENT_PATTERNS = (
+        re.compile(r"继续审查"),
+        re.compile(r"继续检查"),
+        re.compile(r"继续查看"),
+        re.compile(r"继续搜索"),
+        re.compile(r"让我继续"),
+        re.compile(r"让我再看"),
+        re.compile(r"我再看"),
+        re.compile(r"let me continue", re.IGNORECASE),
+        re.compile(r"i(?:'| wi)ll continue", re.IGNORECASE),
+        re.compile(r"let me inspect", re.IGNORECASE),
+        re.compile(r"let me check", re.IGNORECASE),
+        re.compile(r"i(?:'| wi)ll inspect", re.IGNORECASE),
+        re.compile(r"我需要(查看|检查|读取|确认|分析)"),
+        re.compile(r"需要(继续)?(查看|检查|读取|确认|分析)"),
+        re.compile(r"还需要(查看|检查|读取|确认|分析)"),
+        re.compile(r"接下来(查看|检查|读取|确认|分析)"),
+        re.compile(r"让我(查看|检查|读取|确认|分析)"),
+        re.compile(r"我将(查看|检查|读取|确认|分析)"),
+        re.compile(r"继续(查看|检查|读取|确认|分析)"),
+        re.compile(r"\b(let me|i need to|i should|i will|i'll)\s+(read|inspect|check|review|examine|look at)\b", re.IGNORECASE),
+        re.compile(r"\bneed to\s+(read|inspect|check|review|examine|look at)\b", re.IGNORECASE),
+    )
+
+    def __init__(
+        self,
+        *,
+        session_store,
+        model_client,
+        tool_registry=None,
+        tool_orchestrator=None,
+        event_sink=None,
+        require_terminal_action: bool = False,
+        terminal_action_nudge_limit: int = 1,
+    ):
         self._session_store = session_store
         self._model_client = model_client
         self._tool_registry = tool_registry
         self._tool_orchestrator = tool_orchestrator
         self._event_sink = event_sink
+        self._require_terminal_action = bool(require_terminal_action)
+        self._terminal_action_nudge_limit = max(0, int(terminal_action_nudge_limit or 0))
 
     async def run_turn(self, *, session_id: str, model_name: str) -> TurnExecutionResult:
         snapshot = self._session_store.load_session_snapshot(session_id)
@@ -160,9 +199,71 @@ class QueryLoop:
         streamed_records = collected["records"]
         tool_use_context = collected["tool_use_context"]
         streamed_tool_uses = bool(collected.get("tool_uses_appended"))
+        legacy_text_tool_calls = list(collected.get("legacy_text_tool_calls") or [])
         stop_reason: RuntimeStopReason | None = None
         transition: RuntimeContinueReason | None = None
         checkpoint_extra: dict[str, object] | None = None
+        terminal_action: RuntimeTerminalAction | None = None
+        completion_mode: RuntimeCompletionMode | None = None
+        final_payload: dict[str, Any] | None = None
+        continue_intent_without_action = False
+
+        if not tool_requests and legacy_text_tool_calls and tool_definitions and self._tool_orchestrator is not None:
+            legacy_tool_names = [str(item.get("name") or "").strip() for item in legacy_text_tool_calls if str(item.get("name") or "").strip()]
+            if self._should_issue_legacy_tool_syntax_nudge(state=state):
+                transition = RuntimeContinueReason.LEGACY_TOOL_SYNTAX_NUDGE
+                nudge_message = TranscriptItem(
+                    role=RuntimeMessageRole.USER,
+                    content=(
+                        "你刚刚使用了纯文本工具调用语法（例如 Tool Call:/Action:），这类内容不会被执行。"
+                        "如果还需要继续审计，请改用模型提供方原生的结构化工具调用重新发起同一动作。"
+                        "如果已经完成审计，请直接调用 FinalizeFinding 提交最终结构化结果。"
+                    ),
+                    name="legacy_tool_syntax_nudge",
+                    metadata={"synthetic": True, "kind": "legacy_tool_syntax_nudge"},
+                )
+                next_state = build_continue_state(state, messages=[*working_messages, nudge_message], transition=transition)
+                next_state.tool_use_context["legacy_text_tool_call_nudge_count"] = int(
+                    (state.tool_use_context or {}).get("legacy_text_tool_call_nudge_count") or 0
+                ) + 1
+                self._session_store.save_query_loop_state(session_id, next_state)
+                self._session_store.close_turn(turn_id, status="legacy_tool_syntax_nudge")
+                self._write_checkpoint(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    stop_reason=None,
+                    transition=transition,
+                    assistant_message_id=assistant_message_id,
+                    tool_call_ids=[],
+                    extra_state_payload={
+                        "phase": "legacy_tool_syntax",
+                        "legacy_text_tool_call_names": legacy_tool_names,
+                    },
+                )
+                return TurnExecutionResult(
+                    turn_id=turn_id,
+                    stop_reason=None,
+                    assistant_message_id=assistant_message_id,
+                    tool_call_ids=[],
+                    tool_result_message_ids=[],
+                    transition=transition,
+                )
+
+            return self._finalize_terminal_result(
+                session_id=session_id,
+                turn_id=turn_id,
+                state=state,
+                messages=working_messages,
+                stop_reason=RuntimeStopReason.COMPLETED,
+                status="legacy_tool_syntax_incomplete",
+                assistant_message_id=assistant_message_id,
+                terminal_action=RuntimeTerminalAction.NATURAL_END_WITHOUT_TERMINAL_ACTION,
+                completion_mode=RuntimeCompletionMode.INCOMPLETE,
+                checkpoint_extra={
+                    "phase": "legacy_tool_syntax",
+                    "legacy_text_tool_call_names": legacy_tool_names,
+                },
+            )
 
         if tool_requests:
             if not streamed_tool_uses:
@@ -290,7 +391,25 @@ class QueryLoop:
                     assistant_message_id=assistant_message_id,
                     tool_call_ids=tool_call_ids,
                     tool_result_message_ids=tool_result_message_ids,
+                    terminal_action=RuntimeTerminalAction.HOOK_STOP,
                     checkpoint_extra={"hook_stop_reason": post_tool_hook.get("stop_reason")},
+                )
+
+            finalize_payload = self._extract_finalize_payload(records)
+            if finalize_payload is not None:
+                return self._finalize_terminal_result(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    state=state,
+                    messages=working_messages,
+                    stop_reason=RuntimeStopReason.COMPLETED,
+                    status="completed",
+                    assistant_message_id=assistant_message_id,
+                    tool_call_ids=tool_call_ids,
+                    tool_result_message_ids=tool_result_message_ids,
+                    terminal_action=RuntimeTerminalAction.FINALIZE_FINDING,
+                    completion_mode=RuntimeCompletionMode.FINALIZE_TOOL,
+                    final_payload=finalize_payload,
                 )
 
             attachment_messages = build_between_turn_attachments(
@@ -307,7 +426,9 @@ class QueryLoop:
             next_messages = [*working_messages, *list(attachment_messages or [])]
             next_state = build_continue_state(state, messages=next_messages, transition=transition)
             streaming_state = QueryLoopState(tool_use_context=tool_use_context)
-            next_state.tool_use_context = self._apply_tool_search_activations(state=streaming_state, records=records)
+            next_tool_use_context = self._apply_tool_search_activations(state=streaming_state, records=records)
+            next_tool_use_context.pop("missing_terminal_action_nudge_count", None)
+            next_state.tool_use_context = next_tool_use_context
             next_state.pending_tool_use_summary = pending_tool_use_summary
             self._session_store.save_query_loop_state(session_id, next_state)
             self._session_store.close_turn(turn_id, status="tool_results_ready")
@@ -423,6 +544,65 @@ class QueryLoop:
                             transition=transition,
                         )
                     stop_reason = self._coerce_stop_reason(model_response.stop_reason)
+                    continue_intent_without_action = self._has_continue_intent_without_action(
+                        model_response=model_response,
+                        tool_definitions=tool_definitions,
+                    )
+            if (
+                stop_reason is RuntimeStopReason.COMPLETED
+                and self._should_issue_terminal_action_nudge(
+                    state=state,
+                    model_response=model_response,
+                    tool_definitions=tool_definitions,
+                    continue_intent_without_action=continue_intent_without_action,
+                )
+            ):
+                transition = RuntimeContinueReason.TERMINAL_ACTION_NUDGE
+                nudge_message = TranscriptItem(
+                    role=RuntimeMessageRole.USER,
+                    content=(
+                        "你刚刚表达了还要继续审查的意图，但没有真正执行动作。"
+                        "如果还需要继续收集证据，请直接调用下一次工具；"
+                        "如果已经完成审计，请立即调用 FinalizeFinding 提交最终结构化结果。"
+                        "不要只描述下一步计划而不执行。"
+                    ),
+                    name="terminal_action_nudge",
+                    metadata={"synthetic": True, "kind": "terminal_action_nudge"},
+                )
+                nudge_message.content = (
+                    "你刚才没有发起工具调用，也没有调用 FinalizeFinding。Finding 阶段不能用普通文字结束。\n\n"
+                    "如果仍需验证，请立即调用 Read/Grep/Glob/PowerShell 等工具继续查看证据。\n"
+                    "如果审计已经完成，请立即调用 FinalizeFinding，提交 findings 和 summary。\n"
+                    "不要只回复说明文字。"
+                )
+                next_state = build_continue_state(state, messages=[*working_messages, nudge_message], transition=transition)
+                next_state.tool_use_context["missing_terminal_action_nudge_count"] = int(
+                    (state.tool_use_context or {}).get("missing_terminal_action_nudge_count") or 0
+                ) + 1
+                self._session_store.save_query_loop_state(session_id, next_state)
+                self._session_store.close_turn(turn_id, status="terminal_action_nudge")
+                self._write_checkpoint(
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    stop_reason=None,
+                    transition=transition,
+                    assistant_message_id=assistant_message_id,
+                    tool_call_ids=[],
+                )
+                return TurnExecutionResult(
+                    turn_id=turn_id,
+                    stop_reason=None,
+                    assistant_message_id=assistant_message_id,
+                    tool_call_ids=[],
+                    tool_result_message_ids=[],
+                    transition=transition,
+                )
+            if (
+                stop_reason is RuntimeStopReason.COMPLETED
+                and (continue_intent_without_action or self._require_terminal_action)
+            ):
+                terminal_action = RuntimeTerminalAction.NATURAL_END_WITHOUT_TERMINAL_ACTION
+                completion_mode = RuntimeCompletionMode.INCOMPLETE
             return self._finalize_terminal_result(
                 session_id=session_id,
                 turn_id=turn_id,
@@ -431,6 +611,9 @@ class QueryLoop:
                 stop_reason=stop_reason,
                 status="completed",
                 assistant_message_id=assistant_message_id,
+                terminal_action=terminal_action,
+                completion_mode=completion_mode,
+                final_payload=final_payload,
                 checkpoint_extra=checkpoint_extra,
             )
 
@@ -450,6 +633,9 @@ class QueryLoop:
             tool_call_ids=tool_call_ids,
             tool_result_message_ids=tool_result_message_ids,
             transition=transition,
+            terminal_action=terminal_action,
+            completion_mode=completion_mode,
+            final_payload=final_payload,
         )
 
     @staticmethod
@@ -587,6 +773,12 @@ class QueryLoop:
             recoverable_error_kind=str(payload.get("recoverable_error_kind")) if payload.get("recoverable_error_kind") else None,
             recoverable_error_message=str(payload.get("recoverable_error_message")) if payload.get("recoverable_error_message") else None,
             usage=dict(payload.get("usage") or {}),
+            native_tool_call_count=len(list(payload.get("tool_calls") or [])),
+            has_terminal_tool_call=any(
+                str((item or {}).get("name") or "").strip() == "FinalizeFinding"
+                for item in list(payload.get("tool_calls") or [])
+                if isinstance(item, dict)
+            ),
         )
 
     def _finalize_terminal_result(
@@ -602,6 +794,9 @@ class QueryLoop:
         tool_call_ids: list[str] | None = None,
         tool_result_message_ids: list[str] | None = None,
         ignored_tool_calls: list[str] | None = None,
+        terminal_action: RuntimeTerminalAction | None = None,
+        completion_mode: RuntimeCompletionMode | None = None,
+        final_payload: dict[str, Any] | None = None,
         checkpoint_extra: dict[str, object] | None = None,
     ) -> TurnExecutionResult:
         terminal_state = build_terminal_state(state, messages=messages)
@@ -616,7 +811,12 @@ class QueryLoop:
             assistant_message_id=assistant_message_id,
             tool_call_ids=list(tool_call_ids or []),
             ignored_tool_calls=ignored_tool_calls,
-            extra_state_payload=checkpoint_extra,
+            extra_state_payload={
+                **dict(checkpoint_extra or {}),
+                **({"terminal_action": terminal_action.value} if terminal_action is not None else {}),
+                **({"completion_mode": completion_mode.value} if completion_mode is not None else {}),
+                **({"final_payload": dict(final_payload)} if final_payload is not None else {}),
+            } or None,
         )
         return TurnExecutionResult(
             turn_id=turn_id,
@@ -625,6 +825,9 @@ class QueryLoop:
             tool_call_ids=list(tool_call_ids or []),
             tool_result_message_ids=list(tool_result_message_ids or []),
             transition=None,
+            terminal_action=terminal_action,
+            completion_mode=completion_mode,
+            final_payload=dict(final_payload) if final_payload is not None else None,
         )
 
     def _append_transcript_items(
@@ -717,8 +920,13 @@ class QueryLoop:
                             }
                         )
             raw_tool_calls = list(model_response.tool_calls or [])
+            legacy_text_tool_calls: list[dict[str, object]] = []
             if not raw_tool_calls and model_response.content and tool_definitions and self._tool_orchestrator is not None:
-                raw_tool_calls = self._extract_text_tool_calls(model_response.content)
+                extracted_tool_calls = self._extract_text_tool_calls(model_response.content)
+                if self.ALLOW_LEGACY_TEXT_TOOL_CALLS:
+                    raw_tool_calls = extracted_tool_calls
+                else:
+                    legacy_text_tool_calls = list(extracted_tool_calls)
             return {
                 "model_response": model_response,
                 "assistant_message_id": assistant_message_id,
@@ -736,6 +944,7 @@ class QueryLoop:
                 "records": [],
                 "tool_use_context": dict(state.tool_use_context or {}),
                 "tool_uses_appended": False,
+                "legacy_text_tool_calls": legacy_text_tool_calls,
             }
 
         working_messages = list(state.messages)
@@ -873,13 +1082,18 @@ class QueryLoop:
                                 tool_result_message_ids=tool_result_message_ids,
                                 tool_use_context=tool_use_context,
                             )
-            elif event_type == "error":
+            elif event_type == "llm_retry":
                 await self._emit_event(
                     {
-                        "type": "error",
-                        "message_text": str(event.get("user_message") or event.get("error") or "Streaming failed"),
+                        "type": "llm_retry",
+                        "attempt": int(event.get("attempt") or 0),
+                        "max_attempts": int(event.get("max_attempts") or 0),
+                        "message_text": str(event.get("message_text") or "模型服务暂时不可用，正在自动重试。"),
+                        "error_type": str(event.get("error_type") or "").strip() or None,
                     }
                 )
+            elif event_type == "error":
+                raise RuntimeError(str(event.get("user_message") or event.get("error") or "Streaming failed"))
         if executor is not None:
             async for update in executor.get_remaining_updates():
                 tool_use_context = self._consume_executor_update(
@@ -945,16 +1159,20 @@ class QueryLoop:
                         "usage": dict(model_response.usage or {}),
                     }
                 )
+        legacy_text_tool_calls: list[dict[str, object]] = []
         if not tool_requests and model_response.content and tool_definitions and self._tool_orchestrator is not None:
             raw_tool_calls = self._extract_text_tool_calls(model_response.content)
-            for index, item in enumerate(raw_tool_calls, start=1):
-                tool_requests.append(
-                    ToolCallRequest(
-                        id=item.get("id") or f"tool-use-{index}",
-                        name=item["name"],
-                        input=dict(item.get("input") or {}),
+            if self.ALLOW_LEGACY_TEXT_TOOL_CALLS:
+                for index, item in enumerate(raw_tool_calls, start=1):
+                    tool_requests.append(
+                        ToolCallRequest(
+                            id=item.get("id") or f"tool-use-{index}",
+                            name=item["name"],
+                            input=dict(item.get("input") or {}),
+                        )
                     )
-                )
+            else:
+                legacy_text_tool_calls = list(raw_tool_calls)
         return {
             "model_response": model_response,
             "assistant_message_id": assistant_message_id,
@@ -965,6 +1183,7 @@ class QueryLoop:
             "records": records,
             "tool_use_context": tool_use_context,
             "tool_uses_appended": bool(tool_requests and assistant_message_id is not None),
+            "legacy_text_tool_calls": legacy_text_tool_calls,
         }
 
     def _consume_executor_update(
@@ -1011,6 +1230,62 @@ class QueryLoop:
         tool_result_message_ids.append(self._session_store.append_message(session_id, tool_result_item))
         working_messages.append(tool_result_item)
         return tool_use_context
+
+    @staticmethod
+    def _extract_finalize_payload(records) -> dict[str, Any] | None:
+        for record in records or []:
+            if getattr(getattr(record, "request", None), "name", "") != "FinalizeFinding":
+                continue
+            result = getattr(record, "result", None)
+            if result is None or getattr(result, "is_error", False):
+                continue
+            payload = dict(getattr(result, "output_payload", {}) or {})
+            final_payload = payload.get("final_payload")
+            if isinstance(final_payload, dict):
+                return dict(final_payload)
+        return None
+
+    def _should_issue_terminal_action_nudge(
+        self,
+        *,
+        state: QueryLoopState,
+        model_response: RuntimeModelResponse,
+        tool_definitions: list[dict[str, Any]],
+        continue_intent_without_action: bool,
+    ) -> bool:
+        if not tool_definitions:
+            return False
+        if model_response.native_tool_call_count or model_response.has_terminal_tool_call:
+            return False
+        nudge_count = int((state.tool_use_context or {}).get("missing_terminal_action_nudge_count") or 0)
+        if nudge_count >= self._terminal_action_nudge_limit:
+            return False
+        return self._require_terminal_action or continue_intent_without_action
+
+    @classmethod
+    def _should_issue_legacy_tool_syntax_nudge(
+        cls,
+        *,
+        state: QueryLoopState,
+    ) -> bool:
+        nudge_count = int((state.tool_use_context or {}).get("legacy_text_tool_call_nudge_count") or 0)
+        return nudge_count < 1
+
+    @classmethod
+    def _has_continue_intent_without_action(
+        cls,
+        *,
+        model_response: RuntimeModelResponse,
+        tool_definitions: list[dict[str, Any]],
+    ) -> bool:
+        if not tool_definitions:
+            return False
+        if model_response.native_tool_call_count or model_response.has_terminal_tool_call:
+            return False
+        text = str(model_response.content or "").strip()
+        if not text:
+            return False
+        return any(pattern.search(text) for pattern in cls._CONTINUE_INTENT_PATTERNS)
 
     def _append_streaming_assistant_message(self, *, session_id: str, working_messages: list[TranscriptItem], content: str) -> str:
         assistant_item = TranscriptItem(role=RuntimeMessageRole.ASSISTANT, content=content)
@@ -1136,21 +1411,30 @@ class QueryLoop:
             tool_name = tool_call_match.group(1).strip()
             payload_text = tool_call_match.group(2).strip()
             parsed_payload = AgentJsonParser.parse_any(payload_text, default={})
-            if isinstance(parsed_payload, dict) and isinstance(parsed_payload.get('input'), dict):
-                tool_input = dict(parsed_payload.get('input') or {})
-            elif isinstance(parsed_payload, dict):
-                tool_input = parsed_payload
-            else:
-                tool_input = {}
+            tool_input = QueryLoop._extract_tool_input_from_payload(parsed_payload)
             return [{'id': 'text-tool-call-1', 'name': tool_name, 'input': tool_input}]
 
         action_match = re.search(r'Action:\s*([A-Za-z_][A-Za-z0-9_]*)\s*Action Input:\s*(.*)$', text, re.DOTALL)
         if action_match:
             tool_name = action_match.group(1).strip()
             parsed_payload = AgentJsonParser.parse_any(action_match.group(2).strip(), default={})
-            if isinstance(parsed_payload, dict):
-                return [{'id': 'text-tool-call-1', 'name': tool_name, 'input': dict(parsed_payload)}]
+            tool_input = QueryLoop._extract_tool_input_from_payload(parsed_payload)
+            if tool_input:
+                return [{'id': 'text-tool-call-1', 'name': tool_name, 'input': tool_input}]
         return []
+
+    @staticmethod
+    def _extract_tool_input_from_payload(parsed_payload: object) -> dict[str, object]:
+        if isinstance(parsed_payload, dict) and isinstance(parsed_payload.get('input'), dict):
+            return dict(parsed_payload.get('input') or {})
+        if isinstance(parsed_payload, dict):
+            return dict(parsed_payload)
+        if isinstance(parsed_payload, list):
+            for item in parsed_payload:
+                tool_input = QueryLoop._extract_tool_input_from_payload(item)
+                if tool_input:
+                    return tool_input
+        return {}
 
 
 

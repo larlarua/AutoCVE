@@ -1,6 +1,12 @@
-﻿import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { streamAuditSessionMessage, type AuditSessionMessage, type AuditSessionStreamEvent } from "@/shared/api/auditSessions";
+import {
+  streamAuditSessionMessage,
+  type AuditSessionMessage,
+  type AuditSessionMessageMode,
+  type AuditSessionStreamEvent,
+  type AuditSessionStreamResult,
+} from "@/shared/api/auditSessions";
 
 function upsertMessage(messages: AuditSessionMessage[], nextMessage: AuditSessionMessage): AuditSessionMessage[] {
   const index = messages.findIndex((message) => message.id === nextMessage.id);
@@ -24,11 +30,12 @@ export function useAuditSessionChatStream({
   streamMessage?: (
     sessionId: string,
     content: string,
+    mode?: AuditSessionMessageMode,
     handlers?: {
       onEvent?: (event: AuditSessionStreamEvent) => void;
       signal?: AbortSignal;
     },
-  ) => Promise<void>;
+  ) => Promise<AuditSessionStreamResult>;
 }) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
@@ -44,17 +51,20 @@ export function useAuditSessionChatStream({
 
   const handleEvent = useCallback((event: AuditSessionStreamEvent) => {
     if (event.type === "user_message" && event.message) {
-      setMessages((previous) => upsertMessage(previous, event.message!));
+      setStreamError(null);
+      setMessages((previous) => upsertMessage(previous, event.message));
       return;
     }
 
     if (event.type === "assistant_start" && event.message) {
+      setStreamError(null);
       streamingAssistantIdRef.current = event.message.id;
-      setMessages((previous) => upsertMessage(previous, event.message!));
+      setMessages((previous) => upsertMessage(previous, event.message));
       return;
     }
 
     if (event.type === "token") {
+      setStreamError(null);
       const streamingAssistantId = streamingAssistantIdRef.current;
       if (!streamingAssistantId) {
         return;
@@ -73,11 +83,17 @@ export function useAuditSessionChatStream({
     }
 
     if (event.type === "done" && event.message) {
+      setStreamError(null);
       setMessages((previous) => {
         const withoutPlaceholder = previous.filter((message) => message.id !== streamingAssistantIdRef.current);
-        return upsertMessage(withoutPlaceholder, event.message!);
+        return upsertMessage(withoutPlaceholder, event.message);
       });
       streamingAssistantIdRef.current = null;
+      return;
+    }
+
+    if (event.type === "llm_retry") {
+      setStreamError(event.message_text || "模型服务暂时不可用，正在自动重试。");
       return;
     }
 
@@ -93,9 +109,9 @@ export function useAuditSessionChatStream({
     void refresh({ silent: true });
   }, [refresh]);
 
-  const runStreamRequest = useCallback(async (
-    runner: (handlers: { onEvent?: (event: AuditSessionStreamEvent) => void; signal?: AbortSignal }) => Promise<void>,
-  ) => {
+  const runStreamRequest = useCallback(async <TResult,>(
+    runner: (handlers: { onEvent?: (event: AuditSessionStreamEvent) => void; signal?: AbortSignal }) => Promise<TResult>,
+  ): Promise<TResult> => {
     abortRef.current?.abort();
     abortRef.current = new AbortController();
     streamingAssistantIdRef.current = null;
@@ -103,28 +119,32 @@ export function useAuditSessionChatStream({
     setStreamError(null);
 
     try {
-      await runner({
+      const result = await runner({
         signal: abortRef.current.signal,
         onEvent: handleEvent,
       });
       await refresh({ silent: true });
+      return result;
     } catch (error) {
       if (!(error instanceof DOMException && error.name === "AbortError")) {
         setStreamError(error instanceof Error ? error.message : "Streaming failed");
         await refresh({ silent: true });
-        throw error;
       }
+      throw error;
     } finally {
       setIsStreaming(false);
       abortRef.current = null;
     }
   }, [handleEvent, refresh]);
 
-  const sendMessage = useCallback(async (content: string) => {
+  const sendMessage = useCallback(async (
+    content: string,
+    mode: AuditSessionMessageMode = "chat",
+  ): Promise<AuditSessionStreamResult> => {
     if (!sessionId) {
       throw new Error("Missing session id");
     }
-    await runStreamRequest((handlers) => streamMessage(sessionId, content, handlers));
+    return runStreamRequest((handlers) => streamMessage(sessionId, content, mode, handlers));
   }, [runStreamRequest, sessionId, streamMessage]);
 
   return {

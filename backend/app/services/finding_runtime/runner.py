@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from app.services.finding_runtime.models import RuntimeSessionState, RuntimeStopReason, TurnExecutionResult
+from app.services.finding_runtime.models import (
+    RuntimeCompletionMode,
+    RuntimeSessionState,
+    RuntimeStopReason,
+    RuntimeTerminalAction,
+    TurnExecutionResult,
+)
 from app.services.finding_runtime.query_loop import QueryLoop
 
 COMPLETED_SESSION_STOP_REASONS = {
@@ -19,6 +25,8 @@ class FindingRuntimeRunner:
         tool_orchestrator=None,
         max_turns: int | None = None,
         event_sink=None,
+        require_terminal_action: bool = False,
+        terminal_action_nudge_limit: int = 1,
     ):
         self._session_store = session_store
         self._max_turns = max_turns
@@ -28,6 +36,8 @@ class FindingRuntimeRunner:
             tool_registry=tool_registry,
             tool_orchestrator=tool_orchestrator,
             event_sink=event_sink,
+            require_terminal_action=require_terminal_action,
+            terminal_action_nudge_limit=terminal_action_nudge_limit,
         )
 
     async def run_once(self, *, session_id: str, model_name: str) -> TurnExecutionResult:
@@ -43,7 +53,10 @@ class FindingRuntimeRunner:
                         last_result.stop_reason = RuntimeStopReason.COMPLETED
                     session_state = (
                         RuntimeSessionState.COMPLETED
-                        if last_result.stop_reason in COMPLETED_SESSION_STOP_REASONS
+                        if (
+                            last_result.stop_reason in COMPLETED_SESSION_STOP_REASONS
+                            and last_result.completion_mode is not RuntimeCompletionMode.INCOMPLETE
+                        )
                         else RuntimeSessionState.FAILED
                     )
                     self._session_store.update_session_state(session_id, session_state)
@@ -56,6 +69,8 @@ class FindingRuntimeRunner:
                 tool_call_ids=list(last_result.tool_call_ids) if last_result is not None else [],
                 tool_result_message_ids=list(last_result.tool_result_message_ids) if last_result is not None else [],
                 transition=None,
+                terminal_action=RuntimeTerminalAction.MAX_TURNS,
+                completion_mode=RuntimeCompletionMode.INCOMPLETE,
             )
         except Exception:
             self._session_store.update_session_state(session_id, RuntimeSessionState.FAILED)

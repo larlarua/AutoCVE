@@ -1,0 +1,84 @@
+<h2>Agent直审重构方向</h2>
+<p class="subtitle">先确认两个功能在页面里的组织方式，再进入正式视觉设计。请选择最顺手的一种。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">方案 A · 顶部双模式切换</div>
+        <div class="mockup-body">
+          <div style="display:flex;gap:10px;margin-bottom:14px;">
+            <button class="mock-button" style="background:#6b9c80;color:white;">会话管理</button>
+            <button class="mock-button">项目目录</button>
+          </div>
+          <div style="display:flex;gap:12px;height:240px;">
+            <div class="mock-sidebar" style="width:32%;">项目/会话侧栏<br><br>project-a<br>session-1<br>session-2</div>
+            <div class="mock-content" style="flex:1;">主工作区<br><br>大聊天窗口 / 大代码窗口</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>顶部双模式切换</h3>
+      <p>用一个清晰的分段切换器，把“会话管理”和“项目目录”作为两种主工作模式。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">方案 B · 左侧二级导航</div>
+        <div class="mockup-body">
+          <div style="display:flex;gap:12px;height:240px;">
+            <div class="mock-sidebar" style="width:24%;">
+              Agent直审
+              <hr style="margin:10px 0;border:none;border-top:1px solid #d9e2da;">
+              会话管理<br><br>项目目录
+            </div>
+            <div class="mock-content" style="flex:1;">对应功能内容区域<br><br>顶部信息较少，结构更像后台系统</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>左侧二级导航</h3>
+      <p>把两个功能放在页面左边，切换关系更像控制台，但主区域视觉冲击力稍弱。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">方案 C · 上下分区同屏</div>
+        <div class="mockup-body">
+          <div class="mock-content" style="height:104px;margin-bottom:12px;">上半区：会话管理</div>
+          <div class="mock-content" style="height:104px;">下半区：项目目录</div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>同屏双区块</h3>
+      <p>两个功能都在一个页面里直接展示，切换成本低，但最容易再次变得拥挤。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <div class="pros-cons">
+    <div class="pros">
+      <h4>我推荐 A</h4>
+      <ul>
+        <li>最符合你给的两张参考图，一个模块里有两种“工作模式”</li>
+        <li>主工作区可以做得足够大，尤其适合聊天窗和代码查看窗</li>
+        <li>移动端和后续扩展都更容易收敛</li>
+      </ul>
+    </div>
+    <div class="cons">
+      <h4>代价</h4>
+      <ul>
+        <li>需要在页面顶部明确当前模式，避免用户迷路</li>
+        <li>两个模式的状态切换需要保留好项目与文件上下文</li>
+      </ul>
+    </div>
+  </div>
+</div>

@@ -1,4 +1,5 @@
-﻿import { apiClient } from "./serverClient";
+import { apiClient } from "./serverClient";
+import type { ManagedVulnerability } from "./vulnerabilities";
 
 export interface AuditSessionMessage {
   id: string;
@@ -91,8 +92,15 @@ export interface AuditSessionDetail {
   updated_at: string;
 }
 
+export type AuditSessionMessageMode = "chat" | "generate_report_and_sync";
+
+export interface AuditSessionMessageMutationResponse extends AuditSessionMessage {
+  mode: AuditSessionMessageMode;
+  synced_managed_vulnerability?: ManagedVulnerability | null;
+}
+
 export interface AuditSessionStreamEvent {
-  type: "session_created" | "user_message" | "assistant_start" | "token" | "done" | "error";
+  type: "session_created" | "user_message" | "assistant_start" | "token" | "done" | "error" | "llm_retry";
   session_id?: string;
   project_id?: string;
   message?: AuditSessionMessage;
@@ -100,6 +108,16 @@ export interface AuditSessionStreamEvent {
   accumulated?: string;
   usage?: Record<string, unknown>;
   message_text?: string;
+  attempt?: number;
+  max_attempts?: number;
+  error_type?: string;
+  mode?: AuditSessionMessageMode;
+  synced_managed_vulnerability?: ManagedVulnerability | null;
+}
+
+export interface AuditSessionStreamResult {
+  mode: AuditSessionMessageMode;
+  synced_managed_vulnerability?: ManagedVulnerability | null;
 }
 
 export async function getAuditSession(sessionId: string): Promise<AuditSessionDetail> {
@@ -137,8 +155,12 @@ export async function getAuditSessionHandoffs(sessionId: string): Promise<AuditS
   return response.data;
 }
 
-export async function postAuditSessionMessage(sessionId: string, content: string): Promise<AuditSessionMessage> {
-  const response = await apiClient.post(`/audit-sessions/${sessionId}/messages`, { content });
+export async function postAuditSessionMessage(
+  sessionId: string,
+  content: string,
+  mode: AuditSessionMessageMode = "chat",
+): Promise<AuditSessionMessageMutationResponse> {
+  const response = await apiClient.post(`/audit-sessions/${sessionId}/messages`, { content, mode });
   return response.data;
 }
 
@@ -172,11 +194,12 @@ function parseSseChunk(buffer: string): { events: AuditSessionStreamEvent[]; rem
 export async function streamAuditSessionMessage(
   sessionId: string,
   content: string,
+  mode: AuditSessionMessageMode = "chat",
   handlers: {
     onEvent?: (event: AuditSessionStreamEvent) => void;
     signal?: AbortSignal;
   } = {},
-): Promise<void> {
+): Promise<AuditSessionStreamResult> {
   const token = getAccessToken();
   if (!token) {
     throw new Error("Not authenticated");
@@ -189,7 +212,7 @@ export async function streamAuditSessionMessage(
       Accept: "text/event-stream",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, mode }),
     signal: handlers.signal,
   });
 
@@ -204,6 +227,7 @@ export async function streamAuditSessionMessage(
 
   const decoder = new TextDecoder();
   let buffer = "";
+  let streamResult: AuditSessionStreamResult = { mode };
 
   while (true) {
     const { done, value } = await reader.read();
@@ -220,6 +244,14 @@ export async function streamAuditSessionMessage(
       if (event.type === "error") {
         throw new Error(event.message_text || "Streaming failed");
       }
+      if (event.type === "done") {
+        streamResult = {
+          mode: event.mode || mode,
+          synced_managed_vulnerability: event.synced_managed_vulnerability ?? null,
+        };
+      }
     }
   }
+
+  return streamResult;
 }

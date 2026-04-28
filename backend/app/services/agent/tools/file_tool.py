@@ -142,8 +142,8 @@ class FileReadTool(AgentTool):
     @property
     def description(self) -> str:
         return (
-            "Read a file from the audit project. "
-            "Also supports approved shared roots such as the local skill library."
+            "读取审计项目中的文件。"
+            "也支持本地技能库等已批准的共享根目录。"
         )
 
     @property
@@ -290,8 +290,8 @@ class ReadManyFilesTool(FileReadTool):
     @property
     def description(self) -> str:
         return (
-            "Read multiple related source files in one call. "
-            "Use this when comparing source/sink/controller/service/mapper/xml files together."
+            "在一次调用中读取多个相关源码文件。"
+            "适合同时对比 source、sink、controller、service、mapper、xml 文件。"
         )
 
     @property
@@ -402,7 +402,7 @@ class FileSearchTool(AgentTool):
 
     @property
     def description(self) -> str:
-        return "Search code for a keyword or regex pattern with local context."
+        return "使用关键字或正则搜索代码，并返回局部上下文。"
 
     @property
     def args_schema(self):
@@ -515,13 +515,13 @@ class FileSearchTool(AgentTool):
         if not results:
             return ToolResult(
                 success=True,
-                data=f"No matches found for '{normalized_keyword}'.\nSearched {files_searched} files.",
+                data=f"未找到 '{normalized_keyword}' 的匹配结果。\n已搜索 {files_searched} 个文件。",
                 metadata={"files_searched": files_searched, "matches": 0, "keyword": normalized_keyword},
             )
 
         output_parts = [
-            f"Search results for '{normalized_keyword}'\n",
-            f"Found {len(results)} matches across {files_searched} files.\n",
+            f"'{normalized_keyword}' 的搜索结果\n",
+            f"在 {files_searched} 个文件中找到 {len(results)} 处匹配。\n",
         ]
         for result in results:
             output_parts.append(f"\nFile {result['file']}:{result['line']}")
@@ -578,7 +578,7 @@ class ListFilesTool(AgentTool):
 
     @property
     def description(self) -> str:
-        return "List files under the audit project or an approved shared root such as the skill library."
+        return "列出审计项目或技能库等已批准共享根目录下的文件。"
 
     @property
     def args_schema(self):

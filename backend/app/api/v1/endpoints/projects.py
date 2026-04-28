@@ -1,4 +1,5 @@
 from typing import Any, List, Optional
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -181,7 +182,11 @@ def _normalize_zip_local_path(local_path: str | None) -> Optional[str]:
     try:
         return _normalize_managed_local_path(str(candidate))
     except HTTPException:
-        return None
+        # Legacy ZIP projects may already point at a persisted extracted source
+        # directory outside the current managed root. Preview and file listing
+        # should still work as long as the stored path exists and later
+        # path-resolution stays inside that project root.
+        return str(candidate.resolve())
 
 
 def _resolve_persistent_project_root(project: Project) -> Optional[Path]:
@@ -191,17 +196,85 @@ def _resolve_persistent_project_root(project: Project) -> Optional[Path]:
     return Path(normalized).resolve()
 
 
+LOCAL_PROJECT_EXCLUDE_DIR_NAMES = {
+    ".cache",
+    ".git",
+    ".idea",
+    ".mypy_cache",
+    ".next",
+    ".nuxt",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    ".vs",
+    ".vscode",
+    "__pycache__",
+    "build",
+    "coverage",
+    "dist",
+    "env",
+    "node_modules",
+    "out",
+    "target",
+    "tmp",
+    "venv",
+    "vendor",
+}
+
+
+def _should_skip_local_directory(
+    *,
+    project_root: Path,
+    current_root: Path,
+    directory_name: str,
+    exclude_patterns: list[str],
+) -> bool:
+    if directory_name in LOCAL_PROJECT_EXCLUDE_DIR_NAMES:
+        return True
+
+    relative_directory = (current_root / directory_name).relative_to(project_root).as_posix()
+    return should_exclude(f"{relative_directory}/", exclude_patterns)
+
+
 def _list_local_project_files(project_root: Path, exclude_patterns: Optional[list[str]] = None) -> list[dict[str, Any]]:
     exclude_patterns = list(exclude_patterns or [])
     files: list[dict[str, Any]] = []
-    for file_path in sorted(project_root.rglob("*")):
-        if not file_path.is_file():
-            continue
-        relative_path = file_path.relative_to(project_root).as_posix()
-        if should_exclude(relative_path, exclude_patterns):
-            continue
-        files.append({"path": relative_path, "size": file_path.stat().st_size})
+
+    for root, dir_names, file_names in os.walk(project_root, topdown=True):
+        current_root = Path(root)
+        dir_names[:] = sorted(
+            directory_name
+            for directory_name in dir_names
+            if not _should_skip_local_directory(
+                project_root=project_root,
+                current_root=current_root,
+                directory_name=directory_name,
+                exclude_patterns=exclude_patterns,
+            )
+        )
+
+        for file_name in sorted(file_names):
+            file_path = current_root / file_name
+            relative_path = file_path.relative_to(project_root).as_posix()
+            if should_exclude(relative_path, exclude_patterns):
+                continue
+            try:
+                file_size = file_path.stat().st_size
+            except OSError:
+                continue
+            files.append({"path": relative_path, "size": file_size})
     return files
+
+
+def _read_local_text_file(file_path: Path) -> str:
+    return file_path.read_text(encoding="utf-8")
+
+
+def _read_zip_file_bytes(zip_path: str, relative_path: str) -> bytes:
+    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+        with zip_ref.open(relative_path, "r") as file_handle:
+            return file_handle.read()
 
 
 @router.get("/managed-local-directories", response_model=List[ManagedLocalDirectoryResponse])
@@ -573,9 +646,14 @@ async def get_project_files(
     if project.source_type == "zip":
         project_root = _resolve_persistent_project_root(project)
         if project_root is not None:
+            local_entries = await asyncio.to_thread(
+                _list_local_project_files,
+                project_root,
+                parsed_exclude_patterns,
+            )
             return [
                 entry
-                for entry in _list_local_project_files(project_root, parsed_exclude_patterns)
+                for entry in local_entries
                 if is_text_file(str(entry["path"]))
             ]
 
@@ -605,25 +683,16 @@ async def get_project_files(
         if not project.local_path:
             raise HTTPException(status_code=400, detail="local directory project is missing local_path")
 
-        project_root = Path(project.local_path)
+        project_root = Path(project.local_path).resolve()
         if not project_root.exists() or not project_root.is_dir():
             raise HTTPException(status_code=400, detail="local project directory is unavailable")
 
-        for file_path in project_root.rglob("*"):
-            if not file_path.is_file():
-                continue
-
-            relative_path = file_path.relative_to(project_root).as_posix()
-            if should_exclude(relative_path, parsed_exclude_patterns):
-                continue
-            if not is_text_file(relative_path):
-                continue
-
-            try:
-                file_size = file_path.stat().st_size
-            except OSError:
-                continue
-            files.append({"path": relative_path, "size": file_size})
+        local_entries = await asyncio.to_thread(
+            _list_local_project_files,
+            project_root,
+            parsed_exclude_patterns,
+        )
+        files.extend(entry for entry in local_entries if is_text_file(str(entry["path"])))
 
     elif project.source_type == "repository":
         # Handle Repository project
@@ -714,10 +783,6 @@ async def get_project_file_content(
     """
     Read a single text file from the selected project for workspace preview.
     """
-    temp_file_handle = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
-    temp_file_path = temp_file_handle.name
-    temp_file_handle.close()
-
     project = await db.get(Project, id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
@@ -744,7 +809,7 @@ async def get_project_file_content(
             raise HTTPException(status_code=400, detail="only text files can be previewed")
 
         try:
-            content = file_path.read_text(encoding="utf-8")
+            content = await asyncio.to_thread(_read_local_text_file, file_path)
         except UnicodeDecodeError:
             raise HTTPException(status_code=400, detail="file is not valid UTF-8 text")
 
@@ -765,7 +830,7 @@ async def get_project_file_content(
                 raise HTTPException(status_code=400, detail="only text files can be previewed")
 
             try:
-                content = file_path.read_text(encoding="utf-8")
+                content = await asyncio.to_thread(_read_local_text_file, file_path)
             except UnicodeDecodeError as exc:
                 raise HTTPException(status_code=400, detail="file is not valid UTF-8 text") from exc
 
@@ -776,12 +841,9 @@ async def get_project_file_content(
             raise HTTPException(status_code=404, detail="project zip not found")
 
         try:
-            with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                try:
-                    with zip_ref.open(relative_path, "r") as file_handle:
-                        raw_content = file_handle.read()
-                except KeyError as exc:
-                    raise HTTPException(status_code=404, detail="project file not found") from exc
+            raw_content = await asyncio.to_thread(_read_zip_file_bytes, zip_path, relative_path)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="project file not found") from exc
         except HTTPException:
             raise
         except Exception as exc:

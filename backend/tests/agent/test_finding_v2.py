@@ -1,4 +1,4 @@
-import json
+﻿import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -12,6 +12,7 @@ from app.services.agent.agents.finding_skill_preloader import PreloadedSkillCont
 from app.services.agent.agents.analysis_workflow import ToolInvocation
 from app.services.agent.tools.base import AgentTool, ToolResult
 from app.services.agent.tools.thinking_tool import ReflectTool, ThinkTool
+from app.services.finding_runtime.models import RuntimeCompletionMode, RuntimeStopReason, TurnExecutionResult
 
 
 class DummyWorkflowAgent(AnalysisWorkflowAgent):
@@ -345,7 +346,7 @@ async def test_finding_agent_rejects_compatibility_skill_tools():
 
     observation = await agent._execute_step_actions(Step(), {})
 
-    assert "Do not use skill_resource_lookup for Finding runtime skill loading." in observation
+    assert "不要使用 skill_resource_lookup 加载 Finding runtime 技能。" in observation
 
 
 def test_finding_agent_fallback_result_does_not_use_heuristic_findings():
@@ -361,14 +362,14 @@ def test_finding_agent_fallback_result_does_not_use_heuristic_findings():
         SimpleNamespace(
             thought='Tool Calls:\\n- search_code({"keyword":"glueSource"})',
             action="search_code",
-            observation="闁瑰吋绮庨崒銊х磼閹惧浜? glueSource",
+            observation="闂佺懓鍚嬬划搴ㄥ磼閵娧呯＜闁规儳顕禍? glueSource",
         )
     ]
 
     fallback = agent._build_fallback_result()
 
     assert fallback["findings"] == []
-    assert "timed out" in fallback["summary"]
+    assert "最终化" in fallback["summary"]
 
 
 @pytest.mark.asyncio
@@ -593,7 +594,7 @@ async def test_finding_requires_primary_skill_bootstrap_before_general_reads():
 
     observation = await agent._execute_step_actions(step, failed_tool_calls={})
 
-    assert "read_file" in observation
+    assert "Read" in observation
     assert "skill_library/code-audit-finding/SKILL.md" in observation
     agent.execute_tool.assert_not_awaited()
 
@@ -710,7 +711,7 @@ def test_candidate_worker_records_evidence_for_candidate():
         candidate,
         "read_file",
         {"file_path": "app/api/uploads.py", "start_line": 11, "end_line": 19},
-        "闁哄倸娲ｅ▎? app/api/uploads.py\n閻炴稑鏈弳? 11-19\n```python\nowner_id = request.user_id\nservice.approve(upload_id)\n```",
+        "闂佸搫鍊稿ú锝呪枎? app/api/uploads.py\n闁荤偞绋戦張顒勫汲? 11-19\n```python\nowner_id = request.user_id\nservice.approve(upload_id)\n```",
     )
 
     assert result.evidence_bundle_ids
@@ -1063,7 +1064,7 @@ def test_finding_agent_iteration_messages_include_backlog_summaries():
     agent._iteration = 5
 
     messages = agent._build_iteration_messages()
-    context_message = next(item["content"] for item in messages if item["role"] == "user" and "Active candidate local context" in item["content"])
+    context_message = next(item["content"] for item in messages if item["role"] == "user" and "当前候选本地上下文" in item["content"])
 
     assert '"discarded_candidates"' in context_message
     assert '"candidate_id": "cand-x"' in context_message
@@ -1147,7 +1148,7 @@ async def test_finding_agent_initial_message_reports_queue_suppression_summary(m
 
     assert '"max_active_candidates": 2' in message
     assert '"initial_queue_suppressed":' in message
-    assert '"Initial queue generation rules"' in message
+    assert '"初始队列生成规则"' in message
 
 
 @pytest.mark.asyncio
@@ -1182,22 +1183,22 @@ async def test_finding_agent_iteration_messages_include_global_budget_and_report
     ]
 
     messages = agent._build_iteration_messages()
-    context_message = next(item["content"] for item in messages if item["role"] == "user" and "Active candidate local context" in item["content"])
+    context_message = next(item["content"] for item in messages if item["role"] == "user" and "当前候选本地上下文" in item["content"])
 
     assert '"current_iteration": 26' in context_message
     assert '"max_iterations": 32' in context_message
     assert '"rounds_left": 6' in context_message
     assert '"phase": "evidence_collection"' in context_message
-    assert "Stay in evidence collection mode" in context_message
+    assert "保持证据收集模式" in context_message
 
 
-def test_finding_agent_preemptive_finalization_prompt_escalates_by_remaining_rounds():
+def test_finding_agent_preemptive_finalization_prompt_is_disabled_by_default():
     agent = FindingAgent(llm_service=MagicMock(), tools={}, event_emitter=MagicMock())
 
     assert agent._build_preemptive_finalization_prompt(7) == ""
-    assert "Stop expanding coverage" in agent._build_preemptive_finalization_prompt(6)
-    assert "Merge the strongest existing evidence now" in agent._build_preemptive_finalization_prompt(3)
-    assert "Return Final Answer immediately" in agent._build_preemptive_finalization_prompt(1)
+    assert agent._build_preemptive_finalization_prompt(6) == ""
+    assert agent._build_preemptive_finalization_prompt(3) == ""
+    assert agent._build_preemptive_finalization_prompt(1) == ""
 
 
 def test_finding_agent_aborts_llm_failures_immediately_in_final_only_mode():
@@ -1212,7 +1213,7 @@ def test_finding_agent_aborts_llm_failures_immediately_in_final_only_mode():
         phase_reason="closed_exploit_chain_candidate",
     )
 
-    assert agent._should_abort_after_llm_failure("[LLM error: timeout] retry", 1) is True
+    assert agent._should_abort_after_llm_failure("[LLM error: timeout] retry", 1) is False
 
     agent._runtime_state.phase = "evidence_collection"
     assert agent._should_abort_after_llm_failure("[LLM error: timeout] retry", 1) is False
@@ -1849,7 +1850,7 @@ def test_finding_agent_convergence_decision_surfaces_best_report_candidate():
     assert decision["stop_condition"] == "closed_exploit_chain_found"
 
 
-def test_finding_agent_final_only_mode_activates_for_coverage_saturated_finalization():
+def test_finding_agent_final_only_mode_is_disabled_by_default():
     from app.services.agent.agents.finding_controller import AuditPlan, FindingRuntimeState
     from app.services.agent.agents.finding_coverage import CoverageMap
 
@@ -1861,7 +1862,7 @@ def test_finding_agent_final_only_mode_activates_for_coverage_saturated_finaliza
         phase_reason="coverage_saturated",
     )
 
-    assert agent._final_only_mode_active(current_iteration=12) is True
+    assert agent._final_only_mode_active(current_iteration=12) is False
 
 
 def test_analysis_workflow_can_ignore_structured_tool_calls_when_tools_disabled():
@@ -1878,7 +1879,7 @@ def test_analysis_workflow_can_ignore_structured_tool_calls_when_tools_disabled(
 
 
 @pytest.mark.asyncio
-async def test_finding_agent_request_structured_step_omits_tools_in_final_only_mode():
+async def test_finding_agent_request_structured_step_keeps_tools_available_when_guided_finalization_is_disabled():
     from app.services.agent.agents.finding_controller import AuditPlan, FindingRuntimeState
     from app.services.agent.agents.finding_coverage import CoverageMap
 
@@ -1908,11 +1909,11 @@ async def test_finding_agent_request_structured_step_omits_tools_in_final_only_m
     )
 
     call_kwargs = llm_service.chat_completion.await_args.kwargs
-    assert call_kwargs["tools"] == []
+    assert call_kwargs["tools"]
 
 
 @pytest.mark.asyncio
-async def test_finding_agent_final_only_mode_blocks_tool_execution():
+async def test_finding_agent_report_finalization_phase_still_allows_tool_execution_when_guided_finalization_is_disabled():
     from app.services.agent.agents.finding_candidates import CandidateCase
     from app.services.agent.agents.finding_controller import AuditPlan, FindingRuntimeState, WorkerSession
     from app.services.agent.agents.finding_coverage import CoverageMap
@@ -1948,7 +1949,7 @@ async def test_finding_agent_final_only_mode_blocks_tool_execution():
         phase="report_finalization",
         phase_reason="closed_exploit_chain_candidate",
     )
-    agent.execute_tool = AsyncMock(side_effect=AssertionError("tools should not execute in final-only mode"))
+    agent.execute_tool = AsyncMock(return_value="read ok")
 
     step = SimpleNamespace(
         action="read_file",
@@ -1958,8 +1959,8 @@ async def test_finding_agent_final_only_mode_blocks_tool_execution():
 
     observation = await agent._execute_step_actions(step, {})
 
-    assert "Finalization lock active" in observation
-    agent.execute_tool.assert_not_awaited()
+    assert "read ok" in observation
+    agent.execute_tool.assert_awaited_once()
 
 
 def test_finding_agent_checkpoint_persists_closed_candidate_findings(tmp_path):
@@ -2182,4 +2183,82 @@ async def test_finding_runtime_stack_uses_explicit_runtime_turn_limit(monkeypatc
     )
 
     assert captured["max_turns"] == 7
+
+
+@pytest.mark.asyncio
+async def test_finding_runtime_stack_skips_handoff_for_fallback_recovered_result(monkeypatch):
+    captured_handoffs = []
+
+    class FakeBridge:
+        async def run(self, **kwargs):
+            del kwargs
+            return {
+                "session_id": "session-1",
+                "final_payload": {
+                    "findings": [],
+                    "recovered_candidates": [
+                        {
+                            "title": "Recovered SSRF candidate",
+                            "severity": "high",
+                            "vulnerability_type": "ssrf",
+                            "file_path": "app/api/fetch.py",
+                            "line_start": 11,
+                            "line_end": 19,
+                            "description": "Recovered from transcript fallback",
+                            "source": "request.url",
+                            "sink": "requests.get",
+                            "suggestion": "Validate outbound destinations",
+                            "confidence": 0.74,
+                            "needs_verification": True,
+                            "verdict": "candidate",
+                            "impact": "Potential internal access",
+                            "cve_justification": "Recovered candidate only",
+                            "verification_notes": "Needs explicit verification",
+                            "exploit_chain": [],
+                            "poc": {},
+                            "entry_point_refs": ["app/api/fetch.py:11"],
+                            "priority_path_refs": ["app/api/fetch.py"],
+                            "business_flow_notes": ["Recovered from transcript"],
+                            "evidence_gaps": ["recovered_after_finalizer_failure"],
+                        }
+                    ],
+                    "summary": "Recovered from transcript fallback",
+                },
+                "runner_result": TurnExecutionResult(
+                    turn_id="turn-1",
+                    stop_reason=RuntimeStopReason.COMPLETED,
+                    completion_mode=RuntimeCompletionMode.FALLBACK_RECOVERED,
+                ),
+                "skill_route": {},
+                "memory_counts": {},
+            }
+
+        def record_handoff(self, session_id, payload):
+            captured_handoffs.append((session_id, payload))
+
+    agent = FindingAgent(llm_service=MagicMock(), tools={}, event_emitter=MagicMock())
+    monkeypatch.setattr(agent, "_build_runtime_bridge", lambda user_id: FakeBridge())
+    monkeypatch.setattr(
+        "app.services.agent.skill_service.SkillService.resolve_agent_skills",
+        AsyncMock(return_value={"route_plan": {}, "matched": [], "metadata": []}),
+    )
+
+    result = await agent.run(
+        {
+            "project_id": "project-1",
+            "project_info": {"name": "demo", "project_id": "project-1", "root": "."},
+            "config": {"finding_runtime_stack": "runtime"},
+            "task": "audit",
+            "previous_results": {},
+        }
+    )
+
+    assert result.success is False
+    assert result.handoff is None
+    assert captured_handoffs == []
+    assert result.data["findings"] == []
+    assert len(result.data["recovered_candidates"]) == 1
+    assert result.data["recovered_candidates"][0]["title"] == "Recovered SSRF candidate"
+    assert result.data["runtime_completion_mode"] == RuntimeCompletionMode.FALLBACK_RECOVERED.value
+    assert "Finding 未完成" in result.error
 

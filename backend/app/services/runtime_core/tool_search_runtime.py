@@ -49,9 +49,9 @@ def _score_tool_match(query: str, *, tool: RuntimeTool) -> int:
 
 class ToolSearchRuntimeTool(RuntimeTool):
     name = TOOL_SEARCH_TOOL_NAME
-    description = "Search deferred tools by name or capability, then make the matched tools available for the next turn."
+    description = "按名称或能力搜索延迟加载的工具，并在下一轮让匹配工具可用。"
     input_model = ToolSearchInput
-    search_hint = "search deferred tools by name or capability"
+    search_hint = "按名称或能力搜索延迟加载的工具"
     always_load = True
 
     def __init__(self, *, session_store, registry_getter: Callable[[], ToolRegistry]):

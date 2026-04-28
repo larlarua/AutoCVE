@@ -1,6 +1,8 @@
 {
   "continue_reasons": [
     "next_turn",
+    "terminal_action_nudge",
+    "legacy_tool_syntax_nudge",
     "max_output_tokens_escalate",
     "max_output_tokens_recovery",
     "reactive_compact_retry",

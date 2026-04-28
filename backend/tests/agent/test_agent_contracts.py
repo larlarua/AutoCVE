@@ -15,6 +15,7 @@ from app.services.agent.prompts import system_prompts
 from app.services.agent.tools.skill_tool import SkillBodyTool, SkillResourceTool
 from app.services.agent.agents.recon import ReconAgent, ReconStep
 from app.services.agent.skill_service import SkillService
+from app.services.finding_runtime.models import RuntimeCompletionMode, RuntimeStopReason, TurnExecutionResult
 from app.services.skill_file_service import SkillFileService
 from app.services.task_report_service import build_report_payload
 
@@ -173,6 +174,11 @@ def test_finding_initial_message_includes_recon_navigation_and_user_scope(findin
     assert "semgrep_scan" in message
     assert "bandit_scan" in message
     assert "audit payment ownership flow" in message
+    assert "请直接审计代码仓库" in message
+    assert "项目信息" in message
+    assert "审计优先级" in message
+    assert "Review the repository directly" not in message
+    assert "Project information:" not in message
 
 
 def test_finding_initial_message_ignores_legacy_recon_keys_when_canonical_data_missing(finding_agent):
@@ -203,10 +209,10 @@ def test_finding_initial_message_ignores_legacy_recon_keys_when_canonical_data_m
 def test_finding_system_prompt_includes_code_audit_skill_overlay(finding_agent):
     prompt = finding_agent.config.system_prompt
 
-    assert "Bootstrap the current primary audit skill before relying on any of its rules." in prompt
-    assert "Do not rely on scanner-style tools as primary evidence." in prompt
-    assert "read_many_files" in prompt
-    assert "Do not loop on skill materials." in prompt
+    assert "先启动当前主审计技能" in prompt
+    assert "不要把扫描器式工具作为主要证据来源" in prompt
+    assert "Read" in prompt
+    assert "不要反复停留在技能材料上" in prompt
     assert "skill_file_path" in prompt
     assert "references_root" in prompt
     assert "load_skill_body" not in prompt
@@ -294,10 +300,8 @@ def test_finding_initial_message_requires_loading_skill_and_project_specific_ref
     message = finding_agent._build_initial_message(context)
 
     assert "code-audit-finding" in message
-    assert "read the catalog entry's skill_file_path" in message
     assert message.count("<available_skills>") == 1
-    assert "read_many_files" in message
-    assert "Action Batch" in message
+    assert "Read" in message
     assert "skill_file_path" in message
     assert "references_root" in message
     assert "references/checklists/python.md" in message
@@ -306,7 +310,6 @@ def test_finding_initial_message_requires_loading_skill_and_project_specific_ref
     assert "references/security/file_operations.md" in message
     assert "references/adapters/python.yaml" in message
     assert "references/wooyun/INDEX.md" in message
-    assert "Do not treat WooYun cases as evidence" in message
     assert "Fixed-first reads" not in message
     assert "Current routing inputs" not in message
 
@@ -545,7 +548,7 @@ httpUrl.connect();
     recovered = finding_agent._build_fallback_result()
 
     assert recovered["findings"] == []
-    assert "did not produce a compliant Final Answer" in recovered["summary"]
+    assert "没有产出符合要求的 Final Answer" in recovered["summary"]
 
 
 def test_orchestrator_merges_finding_and_triage_handoffs():
@@ -755,6 +758,66 @@ async def test_orchestrator_run_skips_disabled_scan_branch(mock_event_emitter):
     assert result.data["workflow"]["effective_agents"]["scan"] is False
     assert result.data["workflow"]["effective_agents"]["triage"] is False
     assert result.data["workflow"]["effective_agents"]["verification"] is True
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_stops_when_finding_runtime_is_incomplete(mock_event_emitter):
+    finding_result = AgentResult(
+        success=False,
+        data={
+            "findings": [],
+            "runtime_completion_mode": "incomplete",
+            "recovered_candidates": [{"title": "Recovered SSRF candidate"}],
+            "summary": "Finding runtime incomplete",
+        },
+        error="Finding 未完成：运行时没有调用 FinalizeFinding，也没有产出结构化最终结果。",
+    )
+
+    recon_agent = StubSubAgent(AgentResult(success=True, data={"summary": "recon"}))
+    scan_agent = StubSubAgent(AgentResult(success=True, data={"raw_findings": [], "summary": "scan"}))
+    triage_agent = StubSubAgent(AgentResult(success=True, data={"findings": [], "summary": "triage"}))
+    finding_agent = StubSubAgent(finding_result)
+    verification_agent = StubSubAgent(AgentResult(success=True, data={"findings": [], "summary": "verified"}))
+
+    orchestrator = OrchestratorAgent(
+        llm_service=MagicMock(),
+        tools={},
+        event_emitter=mock_event_emitter,
+        sub_agents={
+            "recon": recon_agent,
+            "scan": scan_agent,
+            "triage": triage_agent,
+            "finding": finding_agent,
+            "verification": verification_agent,
+        },
+    )
+
+    result = await orchestrator.run(
+        {
+            "task_id": "task-1",
+            "project_info": {"name": "demo", "root": "/tmp/demo", "file_count": 12},
+            "project_root": "/tmp/demo",
+            "config": {
+                "workflow": {
+                    "agentStates": {
+                        "scan": {"enabled": False},
+                        "triage": {"enabled": False},
+                        "finding": {"enabled": True},
+                        "verification": {"enabled": True},
+                    }
+                }
+            },
+        }
+    )
+
+    assert result.success is False
+    assert "Finding 未完成" in result.error
+    assert len(recon_agent.calls) == 1
+    assert len(finding_agent.calls) == 1
+    assert len(scan_agent.calls) == 0
+    assert len(triage_agent.calls) == 0
+    assert len(verification_agent.calls) == 0
+    assert result.data["phases"]["finding"]["success"] is False
 
 
 @pytest.mark.asyncio
@@ -973,6 +1036,48 @@ async def test_save_findings_uses_supported_status_and_model_fields(mock_db_sess
 
 
 @pytest.mark.asyncio
+async def test_save_findings_does_not_mark_empty_normalized_poc_as_present(mock_db_session, temp_project_dir):
+    findings = [
+        {
+            "title": "Confirmed traversal in uploadLocal",
+            "description": "Confirmed path traversal chain.",
+            "vulnerability_type": "path_traversal",
+            "severity": "high",
+            "file_path": "src/path_vuln.py",
+            "line_start": 4,
+            "line_end": 8,
+            "code_snippet": "with open(filepath, 'r') as f:",
+            "source": "HTTP filename parameter",
+            "sink": "open(filepath)",
+            "suggestion": "Normalize and validate the path.",
+            "confidence": 0.95,
+            "verdict": "confirmed",
+            "poc": {
+                "preconditions": [],
+                "steps": [],
+                "payload": "",
+                "impact": "",
+                "cve_justification": "",
+                "description": "",
+            },
+        }
+    ]
+
+    saved = await _save_findings(
+        mock_db_session,
+        task_id="test-task-id",
+        findings=findings,
+        project_root=temp_project_dir,
+    )
+
+    assert saved == 1
+    record = mock_db_session.add.call_args[0][0]
+    assert record.has_poc is False
+    assert record.poc_description is None
+    assert record.poc_steps is None
+
+
+@pytest.mark.asyncio
 async def test_finding_runtime_stack_preserves_verification_handoff_contract(finding_agent, mock_event_emitter, monkeypatch):
     class FakeBridge:
         def __init__(self):
@@ -1010,6 +1115,11 @@ async def test_finding_runtime_stack_preserves_verification_handoff_contract(fin
                 },
                 "turn_count": 2,
                 "tool_call_count": 3,
+                "runner_result": TurnExecutionResult(
+                    turn_id="turn-1",
+                    stop_reason=RuntimeStopReason.COMPLETED,
+                    completion_mode=RuntimeCompletionMode.FINALIZE_TOOL,
+                ),
                 "skill_route": {"primary_skill": "code-audit-finding"},
                 "memory_counts": {"instruction": 1, "recall": 1},
             }

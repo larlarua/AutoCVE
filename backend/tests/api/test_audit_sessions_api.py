@@ -297,10 +297,104 @@ async def test_post_follow_up_message_continues_runtime_session(monkeypatch):
     await engine.dispose()
 
     assert response.status_code == 200
+    assert response.json()["mode"] == "chat"
     assert len(messages.json()) == 2
     assert messages.json()[0]["role"] == "user"
     assert messages.json()[1]["role"] == "assistant"
     assert messages.json()[1]["payload"]["continued"] is True
+
+
+@pytest.mark.asyncio
+async def test_post_follow_up_message_can_generate_report_and_sync(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        session = AuditSession(
+            project_id="project-1",
+            task_id="task-1",
+            runtime_stack="runtime",
+            state="completed",
+        )
+        db.add(session)
+        await db.commit()
+        session_id = session.id
+
+    app = build_test_app()
+
+    async def override_get_db():
+        async with session_factory() as db:
+            yield db
+
+    async def override_get_current_user():
+        return SimpleNamespace(id="user-1", is_active=True)
+
+    continue_called = False
+
+    async def fake_continue_runtime_session(*, session_id: str, content: str, db):
+        nonlocal continue_called
+        continue_called = True
+
+    async def fake_generate_and_sync(*, session, db):
+        return {
+            "id": "managed-1",
+            "project_id": session.project_id,
+            "task_id": session.task_id,
+            "finding_id": "finding-1",
+            "project_name": "Demo Project",
+            "version_label": "main",
+            "version_tag": None,
+            "branch_name": "main",
+            "commit_sha": None,
+            "repository_url_snapshot": None,
+            "vulnerability_name": "SSRF in report generator",
+            "vulnerability_type": "ssrf",
+            "severity": "high",
+            "file_path": "app/services/report.py",
+            "line_start": 42,
+            "line_end": 57,
+            "human_review_result": "pending",
+            "cve_request_status": "not_requested",
+            "cve_failure_reason": None,
+            "cve_id": None,
+            "report_generation_status": "completed",
+            "source_finding_fingerprint": None,
+            "source_metadata": {},
+            "reports": [],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": None,
+        }
+
+    monkeypatch.setattr(audit_sessions_endpoint, "continue_runtime_session", fake_continue_runtime_session, raising=False)
+    monkeypatch.setattr(
+        audit_sessions_endpoint,
+        "_generate_and_sync_follow_up_managed_vulnerability",
+        fake_generate_and_sync,
+        raising=False,
+    )
+
+    app.dependency_overrides[deps.get_db] = override_get_db
+    app.dependency_overrides[deps.get_current_user] = override_get_current_user
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            f"/api/v1/audit-sessions/{session_id}/messages",
+            json={"content": "please turn the latest finding into a managed report", "mode": "generate_report_and_sync"},
+        )
+
+    await engine.dispose()
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mode"] == "generate_report_and_sync"
+    assert body["synced_managed_vulnerability"]["id"] == "managed-1"
+    assert body["synced_managed_vulnerability"]["report_generation_status"] == "completed"
+    assert continue_called is False
+
 
 @pytest.mark.asyncio
 async def test_stream_follow_up_message_for_runtime_session_uses_runtime_continuation(monkeypatch):
@@ -373,6 +467,155 @@ async def test_stream_follow_up_message_for_runtime_session_uses_runtime_continu
     assert len(messages.json()) == 2
     assert messages.json()[0]["metadata"]["kind"] == "follow_up_user_message"
     assert messages.json()[1]["metadata"]["kind"] == "runtime_follow_up_response"
+
+
+@pytest.mark.asyncio
+async def test_stream_follow_up_message_can_generate_report_and_sync(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        session = AuditSession(
+            project_id="project-1",
+            task_id="task-1",
+            runtime_stack="runtime",
+            state="completed",
+        )
+        db.add(session)
+        await db.commit()
+        session_id = session.id
+
+    app = build_test_app()
+
+    async def override_get_db():
+        async with session_factory() as db:
+            yield db
+
+    async def override_get_current_user():
+        return SimpleNamespace(id="user-1", is_active=True)
+
+    continue_called = False
+
+    async def fake_continue_runtime_session(*, session_id: str, content: str, db):
+        nonlocal continue_called
+        continue_called = True
+
+    async def fake_generate_and_sync(*, session, db):
+        return {
+            "id": "managed-2",
+            "project_id": session.project_id,
+            "task_id": session.task_id,
+            "finding_id": "finding-2",
+            "project_name": "Demo Project",
+            "version_label": "main",
+            "version_tag": None,
+            "branch_name": "main",
+            "commit_sha": None,
+            "repository_url_snapshot": None,
+            "vulnerability_name": "SQL injection",
+            "vulnerability_type": "sql_injection",
+            "severity": "critical",
+            "file_path": "app/api/users.py",
+            "line_start": 88,
+            "line_end": 102,
+            "human_review_result": "pending",
+            "cve_request_status": "not_requested",
+            "cve_failure_reason": None,
+            "cve_id": None,
+            "report_generation_status": "completed",
+            "source_finding_fingerprint": None,
+            "source_metadata": {},
+            "reports": [],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": None,
+        }
+
+    monkeypatch.setattr(audit_sessions_endpoint, "continue_runtime_session", fake_continue_runtime_session, raising=False)
+    monkeypatch.setattr(
+        audit_sessions_endpoint,
+        "_generate_and_sync_follow_up_managed_vulnerability",
+        fake_generate_and_sync,
+        raising=False,
+    )
+
+    app.dependency_overrides[deps.get_db] = override_get_db
+    app.dependency_overrides[deps.get_current_user] = override_get_current_user
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            f"/api/v1/audit-sessions/{session_id}/messages/stream",
+            json={"content": "sync the latest finding into vulnerability management", "mode": "generate_report_and_sync"},
+            headers={"Accept": "text/event-stream"},
+        )
+
+    await engine.dispose()
+
+    assert response.status_code == 200
+    assert '"type": "done"' in response.text
+    assert '"synced_managed_vulnerability"' in response.text
+    assert '"id": "managed-2"' in response.text
+    assert continue_called is False
+
+
+@pytest.mark.asyncio
+async def test_stream_follow_up_message_surfaces_generate_report_error(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        session = AuditSession(
+            project_id="project-1",
+            task_id="task-1",
+            runtime_stack="runtime",
+            state="completed",
+        )
+        db.add(session)
+        await db.commit()
+        session_id = session.id
+
+    app = build_test_app()
+
+    async def override_get_db():
+        async with session_factory() as db:
+            yield db
+
+    async def override_get_current_user():
+        return SimpleNamespace(id="user-1", is_active=True)
+
+    async def fake_generate_and_sync(*, session, db):
+        del session, db
+        raise ValueError("No non-false-positive findings are available for report sync yet.")
+
+    monkeypatch.setattr(
+        audit_sessions_endpoint,
+        "_generate_and_sync_follow_up_managed_vulnerability",
+        fake_generate_and_sync,
+        raising=False,
+    )
+
+    app.dependency_overrides[deps.get_db] = override_get_db
+    app.dependency_overrides[deps.get_current_user] = override_get_current_user
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            f"/api/v1/audit-sessions/{session_id}/messages/stream",
+            json={"content": "regenerate report", "mode": "generate_report_and_sync"},
+            headers={"Accept": "text/event-stream"},
+        )
+
+    await engine.dispose()
+
+    assert response.status_code == 200
+    assert '"type": "error"' in response.text
+    assert '"message_text": "No non-false-positive findings are available for report sync yet."' in response.text
 
 
 @pytest.mark.asyncio

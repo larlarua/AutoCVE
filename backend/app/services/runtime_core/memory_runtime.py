@@ -349,12 +349,12 @@ class RuntimeMemoryManager:
 
 
 def build_memory_message(record: RuntimeMemoryRecord) -> str:
-    heading = "Instruction memory" if record.memory_kind == AuditMemoryKind.INSTRUCTION.value else "Relevant recalled memory"
+    heading = "指令记忆" if record.memory_kind == AuditMemoryKind.INSTRUCTION.value else "相关召回记忆"
     return "\n".join(
         [
             f"{heading}: {record.title}",
-            f"Source: {record.source_type} :: {record.source_ref}",
-            "Use this as scoped guidance and evidence support, not as a substitute for repository-specific proof.",
+            f"来源：{record.source_type} :: {record.source_ref}",
+            "将其作为范围化指南和证据辅助，不要替代项目自身证据。",
             "",
             record.content,
         ]

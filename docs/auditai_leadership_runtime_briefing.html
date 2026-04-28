@@ -1,0 +1,2070 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AuditAI 运行时与能力汇报</title>
+    <link
+      rel="preconnect"
+      href="https://fonts.googleapis.com"
+    />
+    <link
+      rel="preconnect"
+      href="https://fonts.gstatic.com"
+      crossorigin
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700;800&family=Noto+Serif+SC:wght@600;700;900&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      /* ===========================================
+         THEME
+         =========================================== */
+      :root {
+        --bg: #f5f8f3;
+        --bg-soft: #fbfdf9;
+        --panel: rgba(255, 255, 255, 0.84);
+        --panel-strong: rgba(255, 255, 255, 0.94);
+        --line: rgba(123, 189, 168, 0.34);
+        --line-strong: rgba(91, 168, 143, 0.8);
+        --mint: #74c9ac;
+        --mint-deep: #31836c;
+        --mint-soft: #d8f2e6;
+        --ink: #15352f;
+        --ink-soft: #4a655f;
+        --gold: #d9b85d;
+        --amber: #e2aa4d;
+        --danger: #d87063;
+        --shadow: 0 24px 70px rgba(67, 111, 97, 0.13);
+        --shadow-soft: 0 12px 32px rgba(67, 111, 97, 0.1);
+        --radius-xl: clamp(1.2rem, 2vw, 2rem);
+        --radius-lg: clamp(0.9rem, 1.5vw, 1.4rem);
+        --radius-md: clamp(0.7rem, 1vw, 1rem);
+        --font-display: "Noto Serif SC", serif;
+        --font-body: "Noto Sans SC", sans-serif;
+        --font-mono: "IBM Plex Mono", monospace;
+        --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+        --duration-fast: 0.35s;
+        --duration-normal: 0.7s;
+        --duration-slow: 1.4s;
+        --title-size: clamp(1.5rem, 5vw, 4rem);
+        --h2-size: clamp(1.25rem, 3.5vw, 2.4rem);
+        --h3-size: clamp(1rem, 2.3vw, 1.5rem);
+        --body-size: clamp(0.74rem, 1.2vw, 1.02rem);
+        --small-size: clamp(0.62rem, 0.9vw, 0.84rem);
+        --micro-size: clamp(0.56rem, 0.8vw, 0.74rem);
+        --slide-padding: clamp(1rem, 4vw, 4rem);
+        --content-gap: clamp(0.6rem, 1.8vw, 1.6rem);
+        --element-gap: clamp(0.35rem, 1vw, 0.8rem);
+      }
+
+      /* ===========================================
+         BASE RESET
+         =========================================== */
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        overflow-x: hidden;
+      }
+
+      html {
+        scroll-snap-type: y mandatory;
+        scroll-behavior: smooth;
+      }
+
+      body {
+        font-family: var(--font-body);
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(175, 226, 208, 0.5), transparent 30%),
+          radial-gradient(circle at 85% 10%, rgba(221, 236, 194, 0.45), transparent 25%),
+          linear-gradient(180deg, #f8faf6 0%, #f0f7f2 45%, #edf5f1 100%);
+      }
+
+      /* ===========================================
+         VIEWPORT FITTING: MANDATORY BASE STYLES
+         Include this ENTIRE file in every presentation.
+         These styles ensure slides fit exactly in the viewport.
+         =========================================== */
+
+      /* 1. Lock html/body to viewport */
+      html, body {
+          height: 100%;
+          overflow-x: hidden;
+      }
+
+      html {
+          scroll-snap-type: y mandatory;
+          scroll-behavior: smooth;
+      }
+
+      /* 2. Each slide = exact viewport height */
+      .slide {
+          width: 100vw;
+          height: 100vh;
+          height: 100dvh; /* Dynamic viewport height for mobile browsers */
+          overflow: hidden; /* CRITICAL: Prevent ANY overflow */
+          scroll-snap-align: start;
+          display: flex;
+          flex-direction: column;
+          position: relative;
+      }
+
+      /* 3. Content container with flex for centering */
+      .slide-content {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+          max-height: 100%;
+          overflow: hidden; /* Double-protection against overflow */
+          padding: var(--slide-padding);
+      }
+
+      /* 4. ALL typography uses clamp() for responsive scaling */
+      :root {
+          /* Titles scale from mobile to desktop */
+          --title-size: clamp(1.5rem, 5vw, 4rem);
+          --h2-size: clamp(1.25rem, 3.5vw, 2.5rem);
+          --h3-size: clamp(1rem, 2.5vw, 1.75rem);
+
+          /* Body text */
+          --body-size: clamp(0.75rem, 1.5vw, 1.125rem);
+          --small-size: clamp(0.65rem, 1vw, 0.875rem);
+
+          /* Spacing scales with viewport */
+          --slide-padding: clamp(1rem, 4vw, 4rem);
+          --content-gap: clamp(0.5rem, 2vw, 2rem);
+          --element-gap: clamp(0.25rem, 1vw, 1rem);
+      }
+
+      /* 5. Cards/containers use viewport-relative max sizes */
+      .card, .container, .content-box {
+          max-width: min(90vw, 1000px);
+          max-height: min(80vh, 700px);
+      }
+
+      /* 6. Lists auto-scale with viewport */
+      .feature-list, .bullet-list {
+          gap: clamp(0.4rem, 1vh, 1rem);
+      }
+
+      .feature-list li, .bullet-list li {
+          font-size: var(--body-size);
+          line-height: 1.4;
+      }
+
+      /* 7. Grids adapt to available space */
+      .grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(min(100%, 250px), 1fr));
+          gap: clamp(0.5rem, 1.5vw, 1rem);
+      }
+
+      /* 8. Images constrained to viewport */
+      img, .image-container {
+          max-width: 100%;
+          max-height: min(50vh, 400px);
+          object-fit: contain;
+      }
+
+      /* ===========================================
+         RESPONSIVE BREAKPOINTS
+         Aggressive scaling for smaller viewports
+         =========================================== */
+
+      /* Short viewports (< 700px height) */
+      @media (max-height: 700px) {
+          :root {
+              --slide-padding: clamp(0.75rem, 3vw, 2rem);
+              --content-gap: clamp(0.4rem, 1.5vw, 1rem);
+              --title-size: clamp(1.25rem, 4.5vw, 2.5rem);
+              --h2-size: clamp(1rem, 3vw, 1.75rem);
+          }
+      }
+
+      /* Very short viewports (< 600px height) */
+      @media (max-height: 600px) {
+          :root {
+              --slide-padding: clamp(0.5rem, 2.5vw, 1.5rem);
+              --content-gap: clamp(0.3rem, 1vw, 0.75rem);
+              --title-size: clamp(1.1rem, 4vw, 2rem);
+              --body-size: clamp(0.7rem, 1.2vw, 0.95rem);
+          }
+
+          /* Hide non-essential elements */
+          .nav-dots, .keyboard-hint, .decorative {
+              display: none;
+          }
+      }
+
+      /* Extremely short (landscape phones, < 500px height) */
+      @media (max-height: 500px) {
+          :root {
+              --slide-padding: clamp(0.4rem, 2vw, 1rem);
+              --title-size: clamp(1rem, 3.5vw, 1.5rem);
+              --h2-size: clamp(0.9rem, 2.5vw, 1.25rem);
+              --body-size: clamp(0.65rem, 1vw, 0.85rem);
+          }
+      }
+
+      /* Narrow viewports (< 600px width) */
+      @media (max-width: 600px) {
+          :root {
+              --title-size: clamp(1.25rem, 7vw, 2.5rem);
+          }
+
+          /* Stack grids vertically */
+          .grid {
+              grid-template-columns: 1fr;
+          }
+      }
+
+      /* ===========================================
+         REDUCED MOTION
+         Respect user preferences
+         =========================================== */
+      @media (prefers-reduced-motion: reduce) {
+          *, *::before, *::after {
+              animation-duration: 0.01ms !important;
+              transition-duration: 0.2s !important;
+          }
+
+          html {
+              scroll-behavior: auto;
+          }
+      }
+
+      /* ===========================================
+         GLOBAL UI
+         =========================================== */
+      .presentation-shell::before,
+      .presentation-shell::after {
+        content: "";
+        position: fixed;
+        inset: auto;
+        pointer-events: none;
+        z-index: 0;
+      }
+
+      .presentation-shell::before {
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-image:
+          linear-gradient(rgba(120, 184, 166, 0.07) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(120, 184, 166, 0.07) 1px, transparent 1px);
+        background-size: clamp(28px, 3vw, 48px) clamp(28px, 3vw, 48px);
+        mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.45), transparent 85%);
+      }
+
+      .presentation-shell::after {
+        right: clamp(2rem, 7vw, 7rem);
+        top: clamp(1rem, 5vw, 4rem);
+        width: clamp(12rem, 22vw, 24rem);
+        height: clamp(12rem, 22vw, 24rem);
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(117, 206, 176, 0.12), transparent 70%);
+        filter: blur(10px);
+      }
+
+      .progress-bar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 4px;
+        width: 100%;
+        background: rgba(49, 131, 108, 0.08);
+        z-index: 40;
+      }
+
+      .progress-bar::after {
+        content: "";
+        display: block;
+        height: 100%;
+        width: var(--progress, 0%);
+        background: linear-gradient(90deg, var(--mint) 0%, var(--gold) 100%);
+        box-shadow: 0 0 14px rgba(116, 201, 172, 0.45);
+        transition: width var(--duration-fast) ease;
+      }
+
+      .nav-dots {
+        position: fixed;
+        right: clamp(0.6rem, 1.8vw, 1.4rem);
+        top: 50%;
+        transform: translateY(-50%);
+        display: flex;
+        flex-direction: column;
+        gap: clamp(0.45rem, 1vw, 0.75rem);
+        z-index: 30;
+      }
+
+      .nav-dot {
+        width: clamp(0.6rem, 0.9vw, 0.8rem);
+        height: clamp(0.6rem, 0.9vw, 0.8rem);
+        border: 1px solid rgba(49, 131, 108, 0.35);
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.55);
+        cursor: pointer;
+        transition:
+          transform var(--duration-fast) ease,
+          background var(--duration-fast) ease,
+          border-color var(--duration-fast) ease;
+      }
+
+      .nav-dot.active {
+        transform: scale(1.35);
+        background: var(--mint);
+        border-color: var(--line-strong);
+      }
+
+      .deck-meta {
+        position: fixed;
+        left: clamp(1rem, 2vw, 2rem);
+        bottom: clamp(0.9rem, 1.8vw, 1.4rem);
+        z-index: 25;
+        display: flex;
+        align-items: center;
+        gap: clamp(0.6rem, 1vw, 1rem);
+        padding: clamp(0.45rem, 0.8vw, 0.7rem) clamp(0.8rem, 1.3vw, 1.1rem);
+        background: rgba(255, 255, 255, 0.58);
+        border: 1px solid rgba(49, 131, 108, 0.14);
+        border-radius: 999px;
+        box-shadow: var(--shadow-soft);
+        backdrop-filter: blur(16px);
+        font-size: var(--micro-size);
+        color: var(--ink-soft);
+      }
+
+      .deck-meta strong {
+        color: var(--ink);
+        font-weight: 700;
+      }
+
+      .keyboard-hint {
+        position: fixed;
+        right: clamp(1rem, 2vw, 2rem);
+        bottom: clamp(0.8rem, 1.5vw, 1.2rem);
+        z-index: 25;
+        font-size: var(--micro-size);
+        color: rgba(21, 53, 47, 0.6);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      /* ===========================================
+         REVEAL ANIMATIONS
+         =========================================== */
+      .reveal,
+      .reveal-left,
+      .reveal-scale,
+      .reveal-blur {
+        opacity: 0;
+        transition:
+          opacity var(--duration-normal) var(--ease-out-expo),
+          transform var(--duration-normal) var(--ease-out-expo),
+          filter var(--duration-normal) var(--ease-out-expo);
+      }
+
+      .reveal {
+        transform: translateY(clamp(12px, 2vw, 28px));
+      }
+
+      .reveal-left {
+        transform: translateX(clamp(-18px, -2vw, -36px));
+      }
+
+      .reveal-scale {
+        transform: scale(0.93);
+      }
+
+      .reveal-blur {
+        filter: blur(12px);
+      }
+
+      .slide.visible .reveal,
+      .slide.visible .reveal-left,
+      .slide.visible .reveal-scale,
+      .slide.visible .reveal-blur {
+        opacity: 1;
+        transform: translateX(0) translateY(0) scale(1);
+        filter: blur(0);
+      }
+
+      .delay-1 {
+        transition-delay: 0.08s;
+      }
+
+      .delay-2 {
+        transition-delay: 0.16s;
+      }
+
+      .delay-3 {
+        transition-delay: 0.24s;
+      }
+
+      .delay-4 {
+        transition-delay: 0.32s;
+      }
+
+      .delay-5 {
+        transition-delay: 0.4s;
+      }
+
+      .delay-6 {
+        transition-delay: 0.48s;
+      }
+
+      /* ===========================================
+         SHARED COMPONENTS
+         =========================================== */
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: clamp(0.4rem, 0.8vw, 0.65rem);
+        align-self: flex-start;
+        padding: clamp(0.35rem, 0.7vw, 0.55rem) clamp(0.7rem, 1vw, 0.95rem);
+        border-radius: 999px;
+        background: rgba(116, 201, 172, 0.14);
+        border: 1px solid rgba(49, 131, 108, 0.16);
+        font-size: var(--micro-size);
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--mint-deep);
+      }
+
+      .eyebrow::before {
+        content: "";
+        width: clamp(0.35rem, 0.6vw, 0.5rem);
+        height: clamp(0.35rem, 0.6vw, 0.5rem);
+        border-radius: 50%;
+        background: linear-gradient(180deg, var(--mint) 0%, var(--gold) 100%);
+      }
+
+      .section-heading {
+        display: flex;
+        flex-direction: column;
+        gap: clamp(0.55rem, 1vw, 0.8rem);
+        max-width: min(64rem, 88vw);
+        margin-bottom: clamp(0.8rem, 1.5vw, 1.2rem);
+      }
+
+      .section-heading h1,
+      .section-heading h2 {
+        font-family: var(--font-display);
+        font-size: var(--h2-size);
+        line-height: 1.18;
+        letter-spacing: -0.03em;
+      }
+
+      .section-heading p {
+        max-width: min(48rem, 76vw);
+        color: var(--ink-soft);
+        font-size: var(--body-size);
+        line-height: 1.6;
+      }
+
+      .glass-card {
+        background: var(--panel);
+        border: 1px solid rgba(49, 131, 108, 0.16);
+        border-radius: var(--radius-lg);
+        box-shadow: var(--shadow-soft);
+        backdrop-filter: blur(16px);
+      }
+
+      .caption-chip,
+      .metric-chip,
+      .focus-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: clamp(0.35rem, 0.6vw, 0.5rem);
+        padding: clamp(0.45rem, 0.8vw, 0.65rem) clamp(0.7rem, 1.1vw, 0.95rem);
+        border-radius: 999px;
+        font-size: var(--small-size);
+        line-height: 1;
+        white-space: nowrap;
+      }
+
+      .caption-chip {
+        background: rgba(255, 255, 255, 0.8);
+        border: 1px solid rgba(49, 131, 108, 0.14);
+        color: var(--ink-soft);
+      }
+
+      .metric-chip {
+        background: rgba(116, 201, 172, 0.12);
+        border: 1px solid rgba(49, 131, 108, 0.16);
+        color: var(--mint-deep);
+      }
+
+      .focus-chip {
+        background: rgba(217, 184, 93, 0.12);
+        border: 1px solid rgba(217, 184, 93, 0.24);
+        color: #8c6b1b;
+      }
+
+      .split-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+        gap: clamp(0.9rem, 1.8vw, 1.6rem);
+        align-items: stretch;
+        min-height: 0;
+        flex: 1;
+      }
+
+      .panel-title {
+        font-size: var(--small-size);
+        color: var(--mint-deep);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+      }
+
+      .mini-note {
+        color: rgba(21, 53, 47, 0.68);
+        font-size: var(--micro-size);
+        line-height: 1.55;
+      }
+
+      .bullet-list {
+        display: flex;
+        flex-direction: column;
+        list-style: none;
+      }
+
+      .bullet-list li {
+        position: relative;
+        padding-left: clamp(1rem, 1.4vw, 1.25rem);
+        color: var(--ink-soft);
+        line-height: 1.55;
+      }
+
+      .bullet-list li::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0.6em;
+        width: clamp(0.36rem, 0.55vw, 0.5rem);
+        height: clamp(0.36rem, 0.55vw, 0.5rem);
+        border-radius: 50%;
+        background: var(--mint);
+        box-shadow: 0 0 10px rgba(116, 201, 172, 0.45);
+      }
+
+      /* ===========================================
+         SLIDE 1: WORKFLOW ARCHITECTURE
+         =========================================== */
+      .title-slide .slide-content {
+        justify-content: flex-start;
+        gap: clamp(0.9rem, 1.5vw, 1.2rem);
+      }
+
+      .hero-heading h1 {
+        font-family: var(--font-display);
+        font-size: var(--title-size);
+        line-height: 1.08;
+        letter-spacing: -0.05em;
+        max-width: min(40rem, 72vw);
+      }
+
+      .hero-board {
+        position: relative;
+        flex: 1;
+        min-height: 0;
+        padding: clamp(0.9rem, 1.6vw, 1.3rem);
+        border-radius: clamp(1.4rem, 2vw, 2rem);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(244, 250, 246, 0.9)),
+          linear-gradient(180deg, rgba(120, 184, 166, 0.08), transparent 40%);
+        border: 1px solid rgba(49, 131, 108, 0.16);
+        box-shadow: var(--shadow);
+        overflow: hidden;
+      }
+
+      .title-slide .hero-board {
+        min-height: min(74vh, 680px);
+      }
+
+      .hero-board::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(116, 201, 172, 0.09) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(116, 201, 172, 0.09) 1px, transparent 1px);
+        background-size: clamp(20px, 2vw, 32px) clamp(20px, 2vw, 32px);
+        mask-image: radial-gradient(circle at center, black 40%, transparent 100%);
+      }
+
+      .workflow-track {
+        position: absolute;
+        inset: clamp(1rem, 2vw, 1.4rem);
+      }
+
+      .track-svg {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+      }
+
+      .track-svg path {
+        fill: none;
+        stroke-linecap: round;
+        stroke-width: 8;
+        stroke: rgba(116, 201, 172, 0.3);
+        stroke-dasharray: 14 12;
+      }
+
+      .track-svg .solid {
+        stroke: rgba(116, 201, 172, 0.6);
+        stroke-dasharray: none;
+        stroke-width: 5;
+      }
+
+      .workflow-node {
+        position: absolute;
+        width: clamp(10.5rem, 16vw, 13rem);
+        padding: clamp(0.7rem, 1.2vw, 1rem);
+        border-radius: clamp(1.05rem, 1.6vw, 1.5rem);
+        background: rgba(255, 255, 255, 0.88);
+        border: 2px solid rgba(116, 201, 172, 0.6);
+        box-shadow:
+          0 0 0 8px rgba(199, 238, 224, 0.55),
+          0 12px 24px rgba(76, 112, 99, 0.1);
+        display: flex;
+        flex-direction: column;
+        gap: clamp(0.25rem, 0.6vw, 0.45rem);
+        justify-content: center;
+        min-height: clamp(5.8rem, 9vw, 7rem);
+      }
+
+      .workflow-node::before,
+      .workflow-node::after {
+        content: "";
+        position: absolute;
+        top: clamp(0.9rem, 1.2vw, 1.1rem);
+        width: clamp(0.45rem, 0.7vw, 0.62rem);
+        height: clamp(0.45rem, 0.7vw, 0.62rem);
+        border-radius: 50%;
+        background: rgba(116, 201, 172, 0.85);
+      }
+
+      .workflow-node::before {
+        left: clamp(1rem, 1.4vw, 1.25rem);
+      }
+
+      .workflow-node::after {
+        right: clamp(1rem, 1.4vw, 1.25rem);
+      }
+
+      .workflow-node h3 {
+        font-size: clamp(1.15rem, 1.8vw, 1.8rem);
+        line-height: 1.05;
+      }
+
+      .workflow-node .node-state {
+        font-family: var(--font-mono);
+        font-size: var(--small-size);
+        letter-spacing: 0.24em;
+        color: var(--mint-deep);
+      }
+
+      .workflow-node .node-desc {
+        font-size: var(--small-size);
+        color: var(--ink-soft);
+      }
+
+      .node-orchestrator {
+        left: 0%;
+        top: 42%;
+      }
+
+      .node-recon {
+        left: 18%;
+        top: 42%;
+      }
+
+      .node-scan {
+        left: 43%;
+        top: 12%;
+      }
+
+      .node-triage {
+        left: 62%;
+        top: 12%;
+      }
+
+      .node-finding {
+        left: 53%;
+        top: 58%;
+      }
+
+      .node-verification {
+        right: 0%;
+        top: 38%;
+      }
+
+      .chip-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: clamp(0.45rem, 0.8vw, 0.75rem);
+      }
+
+      /* ===========================================
+         SLIDE 2: RUNTIME STATE MACHINE
+         =========================================== */
+      .runtime-slide .split-layout {
+        grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
+        align-items: stretch;
+      }
+
+      .runtime-left,
+      .runtime-right {
+        min-height: 0;
+      }
+
+      .runtime-left {
+        display: grid;
+        grid-template-rows: 1fr 1fr;
+        gap: clamp(0.75rem, 1.2vw, 1rem);
+      }
+
+      .runtime-right {
+        position: relative;
+      }
+
+      .runtime-loop {
+        position: relative;
+        padding: clamp(0.8rem, 1.15vw, 1rem);
+        height: 100%;
+      }
+
+      .loop-board {
+        position: relative;
+        min-height: min(54vh, 430px);
+        height: 100%;
+      }
+
+      .loop-diagram {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
+
+      .loop-diagram path,
+      .loop-diagram line {
+        fill: none;
+        stroke: rgba(116, 201, 172, 0.72);
+        stroke-width: 3.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .loop-diagram .input-line {
+        stroke: rgba(116, 201, 172, 0.58);
+        stroke-dasharray: 7 7;
+      }
+
+      .loop-center {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%);
+        width: clamp(10rem, 14vw, 13rem);
+        height: clamp(10rem, 14vw, 13rem);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: clamp(0.9rem, 1.2vw, 1rem);
+        background: linear-gradient(180deg, rgba(116, 201, 172, 0.2), rgba(255, 255, 255, 0.88));
+        border: 1px solid rgba(49, 131, 108, 0.2);
+        box-shadow: 0 0 0 16px rgba(216, 242, 230, 0.65);
+        font-family: var(--font-display);
+        font-size: clamp(1rem, 1.3vw, 1.2rem);
+        line-height: 1.45;
+      }
+
+      .loop-ring {
+        position: absolute;
+        inset: 12% 12%;
+        border-radius: 50%;
+        border: 2px dashed rgba(116, 201, 172, 0.5);
+        animation: pulse-ring 4.2s ease-in-out infinite;
+      }
+
+      .loop-node {
+        position: absolute;
+        width: clamp(8.8rem, 11vw, 10rem);
+        min-height: clamp(4.8rem, 6vw, 5.4rem);
+        padding: clamp(0.65rem, 0.9vw, 0.82rem);
+        border-radius: var(--radius-md);
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid rgba(49, 131, 108, 0.16);
+        box-shadow: var(--shadow-soft);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 0.2rem;
+        text-align: center;
+      }
+
+      .loop-node strong {
+        font-size: clamp(0.98rem, 1.25vw, 1.12rem);
+      }
+
+      .loop-node span {
+        font-size: clamp(0.78rem, 0.95vw, 0.88rem);
+        color: var(--ink-soft);
+      }
+
+      .loop-task {
+        left: 50%;
+        top: 0%;
+        transform: translateX(-50%);
+      }
+
+      .loop-thought {
+        right: 5%;
+        top: 22%;
+      }
+
+      .loop-action {
+        left: 50%;
+        bottom: 5%;
+        transform: translateX(-50%);
+      }
+
+      .loop-state {
+        left: 5%;
+        top: 52%;
+        transform: translateY(-50%);
+      }
+
+      .state-card {
+        padding: clamp(0.9rem, 1.15vw, 1rem);
+        display: grid;
+        grid-template-rows: auto 1fr;
+        gap: clamp(0.5rem, 0.8vw, 0.7rem);
+      }
+
+      .state-card.warning {
+        border-color: rgba(216, 112, 99, 0.22);
+      }
+
+      .state-card.success {
+        border-color: rgba(49, 131, 108, 0.22);
+      }
+
+      .state-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 0.75rem;
+      }
+
+      .state-head h3 {
+        font-size: clamp(1.3rem, 2vw, 1.8rem);
+      }
+
+      .state-head span {
+        font-size: var(--micro-size);
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      .warning .state-head span {
+        color: var(--danger);
+      }
+
+      .success .state-head span {
+        color: var(--mint-deep);
+      }
+
+      .state-table {
+        width: 100%;
+        border-collapse: collapse;
+        table-layout: fixed;
+      }
+
+      .state-table th,
+      .state-table td {
+        padding: clamp(0.58rem, 0.85vw, 0.72rem) 0;
+        vertical-align: top;
+        border-bottom: 1px dashed rgba(49, 131, 108, 0.12);
+        text-align: left;
+      }
+
+      .state-table tr:last-child td {
+        border-bottom: none;
+      }
+
+      .state-table th {
+        font-size: clamp(0.9rem, 1vw, 1rem);
+        color: var(--mint-deep);
+        letter-spacing: 0.06em;
+        font-weight: 700;
+      }
+
+      .state-table td:first-child {
+        width: 33%;
+        padding-right: clamp(0.8rem, 1vw, 1rem);
+        font-family: var(--font-mono);
+        font-size: clamp(0.88rem, 0.98vw, 0.98rem);
+        color: var(--ink);
+      }
+
+      .state-table td:last-child {
+        font-size: clamp(0.96rem, 1.05vw, 1.02rem);
+        line-height: 1.65;
+        color: var(--ink-soft);
+      }
+
+      /* ===========================================
+         SLIDE 3: REACT DEMO
+         =========================================== */
+      .demo-slide .slide-content {
+        justify-content: space-between;
+      }
+
+      .demo-flow {
+        position: relative;
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: clamp(0.65rem, 1vw, 0.85rem);
+        align-items: stretch;
+        margin-top: clamp(0.3rem, 0.8vw, 0.5rem);
+      }
+
+      .demo-flow::before {
+        content: "";
+        position: absolute;
+        left: 3%;
+        right: 3%;
+        top: 50%;
+        height: 2px;
+        background: linear-gradient(90deg, rgba(116, 201, 172, 0.2), rgba(116, 201, 172, 0.8), rgba(217, 184, 93, 0.5));
+        z-index: 0;
+      }
+
+      .demo-step {
+        position: relative;
+        z-index: 1;
+        padding: clamp(0.75rem, 1vw, 0.95rem);
+        display: flex;
+        flex-direction: column;
+        gap: clamp(0.45rem, 0.7vw, 0.6rem);
+        min-height: min(34vh, 260px);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(248, 252, 249, 0.88));
+        border: 1px solid rgba(49, 131, 108, 0.16);
+        border-radius: var(--radius-lg);
+        box-shadow: var(--shadow-soft);
+      }
+
+      .demo-step::before {
+        content: "";
+        position: absolute;
+        top: calc(-1 * clamp(0.7rem, 1vw, 0.95rem));
+        left: 50%;
+        transform: translateX(-50%);
+        width: clamp(0.85rem, 1vw, 1rem);
+        height: clamp(0.85rem, 1vw, 1rem);
+        border-radius: 50%;
+        background: var(--mint);
+        border: 3px solid rgba(255, 255, 255, 0.95);
+        box-shadow: 0 0 0 5px rgba(116, 201, 172, 0.18);
+      }
+
+      .demo-step .step-type {
+        font-family: var(--font-mono);
+        font-size: var(--micro-size);
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--mint-deep);
+      }
+
+      .demo-step h3 {
+        font-size: var(--small-size);
+        line-height: 1.4;
+      }
+
+      .demo-step p {
+        font-size: var(--micro-size);
+        line-height: 1.65;
+        color: var(--ink-soft);
+      }
+
+      .demo-step.final {
+        background: linear-gradient(180deg, rgba(235, 249, 242, 0.98), rgba(255, 252, 244, 0.95));
+        border-color: rgba(217, 184, 93, 0.36);
+      }
+
+      .demo-step.final::before {
+        background: var(--gold);
+        box-shadow: 0 0 0 5px rgba(217, 184, 93, 0.18);
+      }
+
+      .demo-keywords {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: clamp(0.7rem, 1vw, 0.85rem);
+      }
+
+      .keyword-card {
+        padding: clamp(0.8rem, 1vw, 0.95rem);
+        display: flex;
+        flex-direction: column;
+        gap: clamp(0.4rem, 0.7vw, 0.55rem);
+      }
+
+      .keyword-card strong {
+        font-size: var(--small-size);
+        color: var(--mint-deep);
+      }
+
+      .keyword-card p {
+        font-size: var(--small-size);
+        line-height: 1.6;
+        color: var(--ink-soft);
+      }
+
+      /* ===========================================
+         SLIDE 4: HARNESS
+         =========================================== */
+      .triple-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: clamp(0.8rem, 1.2vw, 1rem);
+      }
+
+      .pillar-card {
+        padding: clamp(0.85rem, 1.1vw, 1rem);
+        display: grid;
+        grid-template-rows: auto auto 1fr;
+        gap: clamp(0.55rem, 0.8vw, 0.7rem);
+      }
+
+      .pillar-icon {
+        width: clamp(2.6rem, 3vw, 3.2rem);
+        height: clamp(2.6rem, 3vw, 3.2rem);
+        border-radius: 0.9rem;
+        background: linear-gradient(180deg, rgba(116, 201, 172, 0.18), rgba(255, 255, 255, 0.92));
+        border: 1px solid rgba(49, 131, 108, 0.16);
+        display: grid;
+        place-items: center;
+        font-family: var(--font-mono);
+        font-size: var(--small-size);
+        color: var(--mint-deep);
+      }
+
+      .pillar-card h3 {
+        font-size: var(--h3-size);
+      }
+
+      .pillar-card .mini-note {
+        min-height: 2.8em;
+      }
+
+      .chip-cloud {
+        display: flex;
+        flex-wrap: wrap;
+        gap: clamp(0.4rem, 0.65vw, 0.55rem);
+      }
+
+      .tiny-chip {
+        padding: clamp(0.35rem, 0.6vw, 0.48rem) clamp(0.55rem, 0.8vw, 0.75rem);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.74);
+        border: 1px solid rgba(49, 131, 108, 0.12);
+        font-size: var(--micro-size);
+        color: var(--ink-soft);
+      }
+
+      /* ===========================================
+         SLIDE 5: DIFFERENTIATION
+         =========================================== */
+      .comparison-board {
+        display: grid;
+        grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+        gap: clamp(0.85rem, 1.4vw, 1.2rem);
+        flex: 1;
+        min-height: 0;
+      }
+
+      .comparison-table {
+        padding: clamp(0.85rem, 1vw, 1rem);
+        display: grid;
+        grid-template-rows: auto 1fr;
+        gap: clamp(0.65rem, 0.9vw, 0.8rem);
+      }
+
+      .compare-header,
+      .compare-row {
+        display: grid;
+        grid-template-columns: minmax(0, 0.22fr) minmax(0, 0.38fr) minmax(0, 0.4fr);
+        gap: clamp(0.5rem, 0.8vw, 0.7rem);
+        align-items: start;
+      }
+
+      .compare-header {
+        font-size: var(--micro-size);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--mint-deep);
+        padding-bottom: 0.35rem;
+        border-bottom: 1px solid rgba(49, 131, 108, 0.12);
+      }
+
+      .compare-row {
+        padding: clamp(0.45rem, 0.7vw, 0.55rem) 0;
+        border-bottom: 1px dashed rgba(49, 131, 108, 0.12);
+        font-size: var(--small-size);
+        line-height: 1.58;
+      }
+
+      .compare-row:last-child {
+        border-bottom: none;
+      }
+
+      .compare-row strong {
+        color: var(--ink);
+      }
+
+      .compare-row span,
+      .compare-row p {
+        color: var(--ink-soft);
+      }
+
+      .value-stack {
+        display: grid;
+        grid-template-rows: auto auto 1fr auto;
+        gap: clamp(0.7rem, 1vw, 0.85rem);
+      }
+
+      .quote-card {
+        padding: clamp(0.95rem, 1.2vw, 1.1rem);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(252, 249, 240, 0.88));
+        border: 1px solid rgba(217, 184, 93, 0.22);
+      }
+
+      .quote-card blockquote {
+        font-family: var(--font-display);
+        font-size: clamp(1rem, 1.6vw, 1.4rem);
+        line-height: 1.6;
+        color: var(--ink);
+      }
+
+      /* ===========================================
+         SLIDE 6: LIMITATIONS
+         =========================================== */
+      .limitation-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+        gap: clamp(0.8rem, 1.2vw, 1rem);
+        flex: 1;
+      }
+
+      .narrative-card {
+        padding: clamp(0.9rem, 1.1vw, 1rem);
+        display: grid;
+        grid-template-rows: auto auto 1fr auto;
+        gap: clamp(0.6rem, 0.9vw, 0.75rem);
+      }
+
+      .narrative-card h3 {
+        font-size: var(--h3-size);
+      }
+
+      .narrative-card p {
+        color: var(--ink-soft);
+        font-size: var(--body-size);
+        line-height: 1.7;
+      }
+
+      .risk-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: clamp(0.7rem, 1vw, 0.8rem);
+      }
+
+      .risk-card {
+        padding: clamp(0.85rem, 1vw, 0.95rem);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(255, 249, 246, 0.92));
+        border: 1px solid rgba(216, 112, 99, 0.16);
+        border-radius: var(--radius-lg);
+        box-shadow: var(--shadow-soft);
+      }
+
+      .risk-card strong {
+        display: block;
+        margin-bottom: clamp(0.35rem, 0.6vw, 0.45rem);
+        font-size: var(--small-size);
+      }
+
+      .risk-card p {
+        font-size: var(--small-size);
+        line-height: 1.6;
+        color: var(--ink-soft);
+      }
+
+      .closing-band {
+        padding: clamp(0.85rem, 1vw, 1rem);
+        border-radius: var(--radius-lg);
+        background: linear-gradient(90deg, rgba(216, 112, 99, 0.12), rgba(255, 255, 255, 0.84));
+        border: 1px solid rgba(216, 112, 99, 0.18);
+        font-size: var(--body-size);
+        line-height: 1.7;
+        color: var(--ink);
+      }
+
+      /* ===========================================
+         SLIDE 7: ROADMAP
+         =========================================== */
+      .roadmap-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: clamp(0.75rem, 1vw, 0.85rem);
+        margin-bottom: clamp(0.8rem, 1vw, 0.9rem);
+      }
+
+      .roadmap-card {
+        padding: clamp(0.9rem, 1.1vw, 1rem);
+        display: grid;
+        grid-template-rows: auto auto 1fr;
+        gap: clamp(0.45rem, 0.7vw, 0.55rem);
+      }
+
+      .roadmap-card h3 {
+        font-size: var(--h3-size);
+      }
+
+      .roadmap-card p {
+        color: var(--ink-soft);
+        font-size: var(--small-size);
+        line-height: 1.6;
+      }
+
+      .stage-bar {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: clamp(0.7rem, 1vw, 0.85rem);
+      }
+
+      .stage-card {
+        padding: clamp(0.85rem, 1vw, 0.95rem);
+        background: rgba(255, 255, 255, 0.88);
+        border: 1px solid rgba(49, 131, 108, 0.14);
+        border-radius: var(--radius-lg);
+        box-shadow: var(--shadow-soft);
+      }
+
+      .stage-card .stage-label {
+        font-family: var(--font-mono);
+        font-size: var(--micro-size);
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--mint-deep);
+        margin-bottom: 0.4rem;
+      }
+
+      .stage-card strong {
+        display: block;
+        margin-bottom: 0.4rem;
+        font-size: var(--small-size);
+      }
+
+      .stage-card p {
+        color: var(--ink-soft);
+        font-size: var(--small-size);
+        line-height: 1.55;
+      }
+
+      /* ===========================================
+         MOBILE / SMALL VIEWPORT ADAPTATIONS
+         =========================================== */
+      @media (max-width: 1100px) {
+        .split-layout,
+        .comparison-board,
+        .limitation-layout,
+        .triple-grid,
+        .roadmap-grid,
+        .stage-bar {
+          grid-template-columns: 1fr;
+        }
+
+        .risk-grid,
+        .demo-keywords {
+          grid-template-columns: 1fr;
+        }
+
+        .demo-flow {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .demo-flow::before {
+          display: none;
+        }
+
+        .workflow-node {
+          width: clamp(8.5rem, 19vw, 11rem);
+        }
+      }
+
+      @media (max-width: 820px) {
+        .workflow-track {
+          position: relative;
+          inset: auto;
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: clamp(0.6rem, 1vw, 0.8rem);
+        }
+
+        .track-svg {
+          display: none;
+        }
+
+        .workflow-node,
+        .node-orchestrator,
+        .node-recon,
+        .node-scan,
+        .node-triage,
+        .node-finding,
+        .node-verification {
+          position: relative;
+          left: auto;
+          right: auto;
+          top: auto;
+          width: 100%;
+        }
+
+        .compare-header,
+        .compare-row {
+          grid-template-columns: 1fr;
+        }
+
+        .demo-flow {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      /* ===========================================
+         AMBIENT ANIMATION
+         =========================================== */
+      @keyframes pulse-ring {
+        0%,
+        100% {
+          transform: scale(1);
+          opacity: 0.9;
+        }
+
+        50% {
+          transform: scale(1.03);
+          opacity: 0.55;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="presentation-shell">
+      <div class="progress-bar" aria-hidden="true"></div>
+      <nav class="nav-dots" aria-label="幻灯片导航"></nav>
+      <div class="deck-meta">
+        <strong>AuditAI</strong>
+        <span>Runtime Briefing</span>
+      </div>
+      <div class="keyboard-hint">Arrow Keys / Space / Swipe</div>
+
+      <!-- ===========================================
+           SLIDE 1
+           =========================================== -->
+      <section class="slide title-slide" data-title="工作流架构">
+        <div class="slide-content">
+          <div class="section-heading">
+            <h1 class="reveal delay-1">工作流架构</h1>
+          </div>
+
+          <div class="hero-board reveal-scale delay-2">
+            <div class="workflow-track">
+              <svg
+                class="track-svg"
+                viewBox="0 0 1000 520"
+                preserveAspectRatio="none"
+                aria-hidden="true"
+              >
+                <path d="M170 285 L250 285 L325 285" class="solid"></path>
+                <path d="M426 210 C470 165, 500 145, 560 145"></path>
+                <path d="M668 145 C720 145, 760 145, 795 175"></path>
+                <path d="M420 300 C470 320, 520 360, 555 390"></path>
+                <path d="M632 390 C700 380, 760 330, 855 265"></path>
+                <path d="M792 170 C815 185, 835 205, 838 265"></path>
+              </svg>
+
+              <article class="workflow-node node-orchestrator reveal delay-2">
+                <h3>Orchestrator</h3>
+                <div class="node-state">ACTIVE</div>
+                <div class="node-desc">调度核心</div>
+              </article>
+
+              <article class="workflow-node node-recon reveal delay-3">
+                <h3>Recon</h3>
+                <div class="node-state">ACTIVE</div>
+                <div class="node-desc">信息收集</div>
+              </article>
+
+              <article class="workflow-node node-scan reveal delay-3">
+                <h3>Scan</h3>
+                <div class="node-state">ACTIVE</div>
+                <div class="node-desc">工具扫描</div>
+              </article>
+
+              <article class="workflow-node node-triage reveal delay-4">
+                <h3>Triage</h3>
+                <div class="node-state">ACTIVE</div>
+                <div class="node-desc">误报过滤</div>
+              </article>
+
+              <article class="workflow-node node-finding reveal delay-4">
+                <h3>Finding</h3>
+                <div class="node-state">ACTIVE</div>
+                <div class="node-desc">深度挖掘</div>
+              </article>
+
+              <article class="workflow-node node-verification reveal delay-5">
+                <h3>Verification</h3>
+                <div class="node-state">ACTIVE</div>
+                <div class="node-desc">最终验证</div>
+              </article>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===========================================
+           SLIDE 2
+           =========================================== -->
+      <section class="slide runtime-slide" data-title="ReAct + 状态机">
+        <div class="slide-content">
+          <div class="section-heading">
+            <span class="eyebrow reveal delay-1">Finding Agent Runtime</span>
+            <h2 class="reveal delay-2">Finding Agent Runtime：ReAct 循环 + 状态机调度</h2>
+          </div>
+
+          <div class="split-layout">
+            <div class="runtime-left">
+              <div class="state-card glass-card warning reveal delay-3">
+                <div class="state-head">
+                  <h3>Terminal 节点</h3>
+                  <span>Terminate</span>
+                </div>
+                <table class="state-table">
+                  <thead>
+                    <tr>
+                      <th>Terminal 节点</th>
+                      <th>触发条件</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>completed</td>
+                      <td>模型不再调用工具，且无需继续推进，正常完成。</td>
+                    </tr>
+                    <tr>
+                      <td>hook_stopped</td>
+                      <td>后置 hook 判定可以停止，例如证据条件满足或流程性停止。</td>
+                    </tr>
+                    <tr>
+                      <td>max_turns</td>
+                      <td>超过最大轮数，Runner 强制终止。</td>
+                    </tr>
+                    <tr>
+                      <td>prompt_too_long / image_error / model_error / aborted_*</td>
+                      <td>上下文、模型或执行异常导致终止。</td>
+                    </tr>
+                    <tr>
+                      <td>stop_hook_prevented</td>
+                      <td>hook 明确阻止继续。</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="state-card glass-card success reveal delay-4">
+                <div class="state-head">
+                  <h3>Continue 节点</h3>
+                  <span>Schedule Next</span>
+                </div>
+                <table class="state-table">
+                  <thead>
+                    <tr>
+                      <th>Continue 节点</th>
+                      <th>触发条件</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>next_turn</td>
+                      <td>工具执行完成，进入下一轮推理。</td>
+                    </tr>
+                    <tr>
+                      <td>token_budget_continuation</td>
+                      <td>还有预算，注入 nudge 消息鼓励模型继续工作。</td>
+                    </tr>
+                    <tr>
+                      <td>max_output_tokens_escalate / recovery</td>
+                      <td>输出截断后恢复继续。</td>
+                    </tr>
+                    <tr>
+                      <td>reactive_compact_retry</td>
+                      <td>上下文过长，触发压缩后重试。</td>
+                    </tr>
+                    <tr>
+                      <td>stop_hook_blocking</td>
+                      <td>hook 注入阻塞提示，要求模型补证据后继续。</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="runtime-right">
+              <div class="runtime-loop glass-card reveal-scale delay-3">
+                <div class="panel-title">循环流程图</div>
+                <div class="loop-board">
+                  <svg
+                    class="loop-diagram"
+                    viewBox="0 0 520 430"
+                    preserveAspectRatio="none"
+                    aria-hidden="true"
+                  >
+                    <defs>
+                      <marker
+                        id="loopArrow"
+                        markerWidth="10"
+                        markerHeight="10"
+                        refX="8"
+                        refY="5"
+                        orient="auto"
+                        markerUnits="strokeWidth"
+                      >
+                        <path d="M0,0 L10,5 L0,10 z" fill="rgba(116, 201, 172, 0.9)"></path>
+                      </marker>
+                    </defs>
+                    <line
+                      class="input-line"
+                      x1="260"
+                      y1="72"
+                      x2="370"
+                      y2="126"
+                      marker-end="url(#loopArrow)"
+                    ></line>
+                    <path
+                      d="M392 174 Q422 246 337 334"
+                      marker-end="url(#loopArrow)"
+                    ></path>
+                    <path
+                      d="M242 340 Q174 316 144 244"
+                      marker-end="url(#loopArrow)"
+                    ></path>
+                    <path
+                      d="M142 194 Q178 124 312 152"
+                      marker-end="url(#loopArrow)"
+                    ></path>
+                  </svg>
+
+                  <div class="loop-ring"></div>
+                  <div class="loop-center">Runtime<br />状态机调度</div>
+
+                  <div class="loop-node loop-task">
+                    <strong>任务输入</strong>
+                    <span>Task Input</span>
+                  </div>
+                  <div class="loop-node loop-thought">
+                    <strong>Thought</strong>
+                    <span>推理下一步</span>
+                  </div>
+                  <div class="loop-node loop-action">
+                    <strong>Action</strong>
+                    <span>调用工具</span>
+                  </div>
+                  <div class="loop-node loop-state">
+                    <strong>状态判断</strong>
+                    <span>Continue / Terminal</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===========================================
+           SLIDE 3
+           =========================================== -->
+      <section class="slide demo-slide" data-title="ReAct 示例">
+        <div class="slide-content">
+          <div class="section-heading">
+            <span class="eyebrow reveal delay-1">ReAct Demo</span>
+            <h2 class="reveal delay-2">ReAct 循环示范的动画实现：从线索到漏洞闭环</h2>
+            <p class="reveal delay-3">
+              用一个领导最容易理解的案例来讲：上传接口是否存在路径穿越 / 任意文件覆盖。重点不是“瞬间判断”，而是 Agent 如何一轮轮收证、补证、闭合利用链。
+            </p>
+          </div>
+
+          <div class="demo-flow">
+            <article class="demo-step reveal delay-1">
+              <span class="step-type">Thought</span>
+              <h3>怀疑上传接口可能存在路径穿越或任意文件覆盖</h3>
+              <p>先基于接口语义建立假设，而不是立即下结论。</p>
+            </article>
+            <article class="demo-step reveal delay-2">
+              <span class="step-type">Action</span>
+              <h3>调用 Grep 搜关键函数，再用 Read 读控制器与文件处理逻辑</h3>
+              <p>快速锁定实现位置、入参与写文件路径拼接点。</p>
+            </article>
+            <article class="demo-step reveal delay-3">
+              <span class="step-type">Observation</span>
+              <h3>发现用户输入文件名参与路径拼接，缺少规范化校验</h3>
+              <p>获得“像漏洞”的代码证据，但还没有闭环成真实利用。</p>
+            </article>
+            <article class="demo-step reveal delay-4">
+              <span class="step-type">Thought</span>
+              <h3>继续确认是否真能写到敏感路径，以及调用链是否可达</h3>
+              <p>从单点 sink 继续向外扩，看路由、鉴权与边界是否成立。</p>
+            </article>
+            <article class="demo-step reveal delay-5">
+              <span class="step-type">Action + Observation</span>
+              <h3>继续 Read / Grep 上游路由、鉴权逻辑，必要时用 PowerShell/Bash 做轻量验证</h3>
+              <p>确认外部可达、权限边界不足或鉴权可绕过，形成利用链。</p>
+            </article>
+            <article class="demo-step final reveal delay-6">
+              <span class="step-type">Final Answer</span>
+              <h3>输出高置信 finding：成因、影响、利用条件、证据位置、修复建议</h3>
+              <p>最终交付的是可验证、可复核、可转报告的结果，而非泛泛告警。</p>
+            </article>
+          </div>
+
+          <div class="demo-keywords">
+            <div class="keyword-card glass-card reveal delay-3">
+              <strong>不是一次性判断，而是“逐轮收证”</strong>
+              <p>Runner 每轮都能根据新 observation 调整搜索方向，避免过早下结论。</p>
+            </div>
+            <div class="keyword-card glass-card reveal delay-4">
+              <strong>不是只看 sink，而是“闭合利用链”</strong>
+              <p>从入口、鉴权、边界、影响面一路往后追，直到证明“为什么真能打”。</p>
+            </div>
+            <div class="keyword-card glass-card reveal delay-5">
+              <strong>不是泛泛告警，而是“高置信输出”</strong>
+              <p>目标是把 finding 打磨成接近研究员结论，而不是堆出更多怀疑点。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===========================================
+           SLIDE 4
+           =========================================== -->
+      <section class="slide" data-title="Harness 配件">
+        <div class="slide-content">
+          <div class="section-heading">
+            <span class="eyebrow reveal delay-1">Harness Capabilities</span>
+            <h2 class="reveal delay-2">Harness 配件：工具、Skill、上下文压缩</h2>
+          </div>
+
+          <div class="triple-grid">
+            <article class="pillar-card glass-card reveal-left delay-2">
+              <div class="pillar-icon">T1</div>
+              <h3>工具与工具编排</h3>
+              <p class="mini-note">统一挂在 Runtime Tool Registry 下，由 Tool Orchestrator 做参数校验、权限检查、执行记录与并发调度。</p>
+              <div class="chip-cloud">
+                <span class="tiny-chip">Read</span>
+                <span class="tiny-chip">Glob</span>
+                <span class="tiny-chip">Grep</span>
+                <span class="tiny-chip">Write</span>
+                <span class="tiny-chip">Bash</span>
+                <span class="tiny-chip">PowerShell</span>
+                <span class="tiny-chip">Skill</span>
+                <span class="tiny-chip">TodoWrite</span>
+                <span class="tiny-chip">AskUser</span>
+                <span class="tiny-chip">ToolSearch</span>
+                <span class="tiny-chip">Guardrail</span>
+                <span class="tiny-chip">并发调度</span>
+              </div>
+            </article>
+
+            <article class="pillar-card glass-card reveal delay-3">
+              <div class="pillar-icon">S2</div>
+              <h3>Skill 机制与渐进式披露</h3>
+              <p class="mini-note">Skill 不是一次性全量塞进上下文，而是先给导航，再按阶段展开正文、参考资料与脚本。</p>
+              <ul class="bullet-list">
+                <li>catalog → body → references → examples → scripts → full</li>
+                <li>前期先帮助模型“找到方向”，后期再注入细节。</li>
+                <li>避免上下文被技能文档淹没，提高有效 token 密度。</li>
+              </ul>
+            </article>
+
+            <article class="pillar-card glass-card reveal delay-4">
+              <div class="pillar-icon">C3</div>
+              <h3>上下文压缩与适用场景</h3>
+              <p class="mini-note">Runtime 内置多层压缩策略，目标是在长链调查中尽量保留关键证据，不让 Agent 因 token 压力失焦。</p>
+              <ul class="bullet-list">
+                <li>tool result budget：大文件、多命中搜索先裁剪。</li>
+                <li>history snip / microcompact：保留最近关键轮次。</li>
+                <li>context collapse：把老上下文折叠为摘要。</li>
+                <li>auto / reactive compact：prompt too long 时自动压缩重试。</li>
+                <li>post-compact reinjection：补回关键附件、skill 片段与 plan 状态。</li>
+              </ul>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===========================================
+           SLIDE 5
+           =========================================== -->
+      <section class="slide" data-title="差异化价值">
+        <div class="slide-content">
+          <div class="section-heading">
+            <span class="eyebrow reveal delay-1">Why AuditAI</span>
+            <h2 class="reveal delay-2">为什么 AuditAI 不只是“更聪明的扫描器”</h2>
+            <p class="reveal delay-3">
+              传统扫描器回答“哪里像漏洞”，AuditAI 更努力回答“这里为什么真能打成漏洞”。
+            </p>
+          </div>
+
+          <div class="comparison-board">
+            <div class="comparison-table glass-card reveal-left delay-3">
+              <div class="compare-header">
+                <span>维度</span>
+                <span>传统扫描工具</span>
+                <span>AuditAI</span>
+              </div>
+
+              <div class="compare-row">
+                <strong>分析方式</strong>
+                <span>标准化规则覆盖，偏模式匹配。</span>
+                <p>推理 + 工具 + 多轮求证，更像研究员逐步排查。</p>
+              </div>
+
+              <div class="compare-row">
+                <strong>关注对象</strong>
+                <span>容易停留在单点危险函数。</span>
+                <p>更关注从入口到影响面的完整利用链。</p>
+              </div>
+
+              <div class="compare-row">
+                <strong>优势场景</strong>
+                <span>规则成熟、结构稳定、覆盖可量化的场景。</span>
+                <p>复杂逻辑漏洞、权限边界、鉴权绕过、多跳调用链。</p>
+              </div>
+
+              <div class="compare-row">
+                <strong>产出目标</strong>
+                <span>最大化告警数量。</span>
+                <p>尽快收敛到高置信漏洞，而不是堆疑似点。</p>
+              </div>
+
+              <div class="compare-row">
+                <strong>工程价值</strong>
+                <span>适合作为基础覆盖层。</span>
+                <p>已具备快速挖掘开源项目可提交 CVE 线索的工程化能力。</p>
+              </div>
+            </div>
+
+            <div class="value-stack reveal delay-4">
+              <div class="glass-card pillar-card">
+                <div class="panel-title">主结论</div>
+                <h3>强在“推理 + 工具 + 利用链闭环”</h3>
+                <p class="mini-note">
+                  对复杂上下文理解、跨文件链路、业务逻辑漏洞，AuditAI 的有效性明显高于单纯规则扫描。
+                </p>
+              </div>
+
+              <div class="chip-row">
+                <span class="metric-chip">跨文件推理</span>
+                <span class="metric-chip">业务逻辑理解</span>
+                <span class="metric-chip">高置信 finding</span>
+              </div>
+
+              <div class="quote-card glass-card">
+                <blockquote>
+                  “传统扫描工具回答哪里像漏洞，AuditAI 更努力回答这里为什么真能打成漏洞。”
+                </blockquote>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===========================================
+           SLIDE 6
+           =========================================== -->
+      <section class="slide" data-title="当前局限">
+        <div class="slide-content">
+          <div class="section-heading">
+            <span class="eyebrow reveal delay-1">Current Limits</span>
+            <h2 class="reveal delay-2">当前局限：覆盖率不可控，偏向高质量但不保证全量发现</h2>
+          </div>
+
+          <div class="limitation-layout">
+            <div class="narrative-card glass-card reveal-left delay-2">
+              <div class="panel-title">主叙事</div>
+              <h3>更像“高水平研究员助手”，还不是“确定性覆盖引擎”</h3>
+              <p>
+                AuditAI 已经具备打点突破能力，适合找到高价值、可打穿的真实漏洞；但它仍然受到时间预算、上下文预算、工具稳定性与技能适配度的共同影响，暂时无法承诺稳定、可量化的全覆盖。
+              </p>
+              <div class="chip-row">
+                <span class="focus-chip">高价值漏洞优先</span>
+                <span class="caption-chip">覆盖边界尚不稳定</span>
+              </div>
+              <div class="closing-band">
+                一句适合领导的表述：它已经具备“打点突破”的能力，但离“可度量、可证明覆盖”的平台化扫描能力还有差距。
+              </div>
+            </div>
+
+            <div class="risk-grid">
+              <article class="risk-card reveal delay-3">
+                <strong>漏洞覆盖率不可控</strong>
+                <p>Agent 会受时间预算、上下文预算、搜索路径选择影响，无法像规则扫描那样给出清晰覆盖边界。</p>
+              </article>
+              <article class="risk-card reveal delay-4">
+                <strong>攻防差异性明显</strong>
+                <p>更适合“找出一个能打穿的真实漏洞”，不适合承诺“所有同类漏洞都已扫到”。</p>
+              </article>
+              <article class="risk-card reveal delay-5">
+                <strong>收敛质量依赖上下文与 Skill</strong>
+                <p>项目结构复杂、技能库不贴合、压缩过早，都可能让深层线索丢失。</p>
+              </article>
+              <article class="risk-card reveal delay-6">
+                <strong>工程稳定性仍在增强</strong>
+                <p>长链调查中的预算控制、错误恢复、策略切换仍在持续打磨。</p>
+              </article>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===========================================
+           SLIDE 7
+           =========================================== -->
+      <section class="slide" data-title="后续规划">
+        <div class="slide-content">
+          <div class="section-heading">
+            <span class="eyebrow reveal delay-1">Roadmap</span>
+            <h2 class="reveal delay-2">后续规划：从“能挖到”走向“更稳定、更可控、更可规模化”</h2>
+          </div>
+
+          <div class="roadmap-grid">
+            <article class="roadmap-card glass-card reveal-left delay-2">
+              <span class="panel-title">主线 01</span>
+              <h3>覆盖率工程化</h3>
+              <p>建设标准漏洞基准集与项目级评测集，引入任务完成率、漏洞族覆盖率、有效利用链闭合率等指标。</p>
+            </article>
+            <article class="roadmap-card glass-card reveal delay-3">
+              <span class="panel-title">主线 02</span>
+              <h3>Runtime 强化</h3>
+              <p>继续完善状态机、错误恢复、策略切换、长上下文调度，让 Agent 少走弯路、少空转。</p>
+            </article>
+            <article class="roadmap-card glass-card reveal delay-4">
+              <span class="panel-title">主线 03</span>
+              <h3>Skill 与 Harness 扩展</h3>
+              <p>补齐更多漏洞族技能、项目类型模板、工具编排策略，让 Agent 更快进入有效调查路径。</p>
+            </article>
+            <article class="roadmap-card glass-card reveal delay-5">
+              <span class="panel-title">主线 04</span>
+              <h3>报告与闭环平台化</h3>
+              <p>把 finding、report bundle、漏洞管理同步、复核反馈串成完整流水线，形成可复盘资产。</p>
+            </article>
+          </div>
+
+          <div class="stage-bar">
+            <div class="stage-card reveal delay-3">
+              <div class="stage-label">Short Term</div>
+              <strong>提高单项目高价值漏洞产出效率</strong>
+              <p>优先提升“找到真漏洞”的速度与稳定性，形成更强的单点突破能力。</p>
+            </div>
+            <div class="stage-card reveal delay-4">
+              <div class="stage-label">Mid Term</div>
+              <strong>提升覆盖率可解释性和稳定性</strong>
+              <p>让结果不仅更好，还更可量化、可复盘、可被管理层理解。</p>
+            </div>
+            <div class="stage-card reveal delay-5">
+              <div class="stage-label">Long Term</div>
+              <strong>形成 AI 驱动的漏洞挖掘与管理平台</strong>
+              <p>把挖掘、验证、报告、管理、反馈统一到平台级闭环中。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      /* ===========================================
+         SLIDE PRESENTATION CONTROLLER
+         =========================================== */
+      class SlidePresentation {
+        constructor() {
+          this.slides = Array.from(document.querySelectorAll(".slide"));
+          this.navDotsContainer = document.querySelector(".nav-dots");
+          this.progressBar = document.querySelector(".progress-bar");
+          this.currentSlide = 0;
+          this.isNavigatingByWheel = false;
+          this.touchStartY = 0;
+          this.touchDeltaY = 0;
+
+          this.setupIntersectionObserver();
+          this.setupKeyboardNav();
+          this.setupWheelNav();
+          this.setupTouchNav();
+          this.setupNavDots();
+          this.updateProgressBar();
+        }
+
+        setupIntersectionObserver() {
+          const observer = new IntersectionObserver(
+            (entries) => {
+              entries.forEach((entry) => {
+                const slideIndex = this.slides.indexOf(entry.target);
+                if (entry.isIntersecting && entry.intersectionRatio > 0.55) {
+                  entry.target.classList.add("visible");
+                  this.currentSlide = slideIndex;
+                  this.updateNavDots();
+                  this.updateProgressBar();
+                }
+              });
+            },
+            {
+              threshold: [0.55, 0.75],
+            }
+          );
+
+          this.slides.forEach((slide, index) => {
+            if (index === 0) slide.classList.add("visible");
+            observer.observe(slide);
+          });
+        }
+
+        setupKeyboardNav() {
+          window.addEventListener("keydown", (event) => {
+            const nextKeys = ["ArrowDown", "PageDown", " ", "Enter"];
+            const prevKeys = ["ArrowUp", "PageUp"];
+
+            if (nextKeys.includes(event.key)) {
+              event.preventDefault();
+              this.goToSlide(Math.min(this.currentSlide + 1, this.slides.length - 1));
+            }
+
+            if (prevKeys.includes(event.key)) {
+              event.preventDefault();
+              this.goToSlide(Math.max(this.currentSlide - 1, 0));
+            }
+
+            if (event.key === "Home") {
+              event.preventDefault();
+              this.goToSlide(0);
+            }
+
+            if (event.key === "End") {
+              event.preventDefault();
+              this.goToSlide(this.slides.length - 1);
+            }
+          });
+        }
+
+        setupWheelNav() {
+          window.addEventListener(
+            "wheel",
+            (event) => {
+              if (this.isNavigatingByWheel) return;
+              if (Math.abs(event.deltaY) < 40) return;
+
+              this.isNavigatingByWheel = true;
+              if (event.deltaY > 0) {
+                this.goToSlide(Math.min(this.currentSlide + 1, this.slides.length - 1));
+              } else {
+                this.goToSlide(Math.max(this.currentSlide - 1, 0));
+              }
+
+              window.setTimeout(() => {
+                this.isNavigatingByWheel = false;
+              }, 650);
+            },
+            { passive: true }
+          );
+        }
+
+        setupTouchNav() {
+          window.addEventListener(
+            "touchstart",
+            (event) => {
+              this.touchStartY = event.changedTouches[0].clientY;
+            },
+            { passive: true }
+          );
+
+          window.addEventListener(
+            "touchend",
+            (event) => {
+              this.touchDeltaY = event.changedTouches[0].clientY - this.touchStartY;
+              if (Math.abs(this.touchDeltaY) < 45) return;
+
+              if (this.touchDeltaY < 0) {
+                this.goToSlide(Math.min(this.currentSlide + 1, this.slides.length - 1));
+              } else {
+                this.goToSlide(Math.max(this.currentSlide - 1, 0));
+              }
+            },
+            { passive: true }
+          );
+        }
+
+        setupNavDots() {
+          this.navDotsContainer.innerHTML = "";
+          this.slides.forEach((slide, index) => {
+            const dot = document.createElement("button");
+            dot.type = "button";
+            dot.className = "nav-dot";
+            dot.setAttribute("aria-label", `跳转到第 ${index + 1} 页：${slide.dataset.title || ""}`);
+            dot.addEventListener("click", () => this.goToSlide(index));
+            this.navDotsContainer.appendChild(dot);
+          });
+          this.updateNavDots();
+        }
+
+        updateNavDots() {
+          const dots = Array.from(this.navDotsContainer.querySelectorAll(".nav-dot"));
+          dots.forEach((dot, index) => {
+            dot.classList.toggle("active", index === this.currentSlide);
+          });
+        }
+
+        updateProgressBar() {
+          const ratio =
+            this.slides.length <= 1 ? 100 : (this.currentSlide / (this.slides.length - 1)) * 100;
+          this.progressBar.style.setProperty("--progress", `${ratio}%`);
+        }
+
+        goToSlide(index) {
+          this.currentSlide = index;
+          this.slides[index].scrollIntoView({ behavior: "smooth", block: "start" });
+          this.updateNavDots();
+          this.updateProgressBar();
+        }
+      }
+
+      window.addEventListener("DOMContentLoaded", () => {
+        new SlidePresentation();
+      });
+    </script>
+  </body>
+</html>

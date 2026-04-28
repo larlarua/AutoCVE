@@ -1,4 +1,4 @@
-import json
+﻿import json
 import re
 import os
 import tempfile
@@ -18,6 +18,7 @@ from .finding_worker import CandidateWorker
 from ..skill_service import SkillService
 from app.services.finding_runtime.bridge import FindingRuntimeBridge
 from app.services.finding_runtime.config import FindingRuntimeStack, coerce_finding_runtime_stack
+from app.services.finding_runtime.models import RuntimeCompletionMode
 
 
 FINDING_SYSTEM_PROMPT = """你是 AuditAI 的高级漏洞挖掘 Agent，你的唯一使命是通过源码审计发现能够申报 CVE 或能被 各大厂商src / HackerOne / Bugcrowd 等赏金平台接收的真实安全漏洞。
@@ -120,8 +121,30 @@ FINDING_SYSTEM_PROMPT = """你是 AuditAI 的高级漏洞挖掘 Agent，你的�
       "confidence": 0.95,
       "needs_verification": true,
       "verdict": "candidate|confirmed",
-      "exploit_chain": [],
-      "poc": {},
+      "exploit_chain": [
+        {
+          "step": 1,
+          "location": "path/to/file:line-line",
+          "description": "...",
+          "data_state": "...",
+          "bypass_reason": "..."
+        }
+      ],
+      "poc": {
+        "description": "...",
+        "preconditions": ["..."],
+        "steps": [
+          {
+            "step": 1,
+            "action": "...",
+            "request": "...",
+            "expected_response": "..."
+          }
+        ],
+        "payload": "...",
+        "impact": "...",
+        "cve_justification": "..."
+      },
       "impact": "...",
       "cve_justification": "...",
       "verification_notes": "..."
@@ -129,14 +152,12 @@ FINDING_SYSTEM_PROMPT = """你是 AuditAI 的高级漏洞挖掘 Agent，你的�
   ],
   "summary": "..."
 }
-
-要求：
-- `findings` 必须是数组
-- `summary` 必须是字符串
-- 每个 finding 都必须尽量兼容当前 Analysis / Finding 持久化字段
-- 如果未发现符合要求的漏洞，返回：
-  - `"findings": []`
-  - `summary` 中诚实说明已审计的攻击面与未发现原因
+要求规范：
+- 禁止把最终漏洞结论写入 reason、notes、summary 或自然语言段落。
+- 如果任一 finding 缺少 file_path、source、sink、exploit_chain、poc、impact、cve_justification 或 verification_notes，不要调用 FinalizeFinding。
+- exploit_chain 至少包含 1 步，每步必须有 step、location、description。
+- poc 必须包含 description、steps、impact、cve_justification；steps 至少 1 步，每步必须有 step 和 action。
+- 未发现符合条件的漏洞时，可以返回 findings: []，并在 summary 中说明已审计范围和未发现原因。
 
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -181,10 +202,10 @@ FINDING_SYSTEM_PROMPT = """你是 AuditAI 的高级漏洞挖掘 Agent，你的�
 请优先使用中文回复。优先继续调用工具收集证据，而不是过早结束。只有在证据闭合或已充分审计后，才给出结论。"""
 
 
-
 class FindingAgent(AnalysisWorkflowAgent):
     finding_origin = "direct_finding"
     evidence_type = "source-analysis"
+    GUIDED_REPORT_FINALIZATION_ENABLED = False
     HISTORY_ASSISTANT_LIMIT = 1200
     HISTORY_OBSERVATION_LIMIT = 1600
     HISTORY_FINALIZATION_TOKEN_THRESHOLD = 250000
@@ -313,18 +334,45 @@ class FindingAgent(AnalysisWorkflowAgent):
         )
         final_payload = bridge_result.get("final_payload") or {
             "findings": [],
-            "summary": "Runtime finding session completed without a parseable final answer.",
+            "summary": "Finding runtime ended without a parseable final audit conclusion.",
         }
         processed = self._postprocess_result(final_payload)
+        runtime_completion_mode = self._coerce_runtime_completion_mode(bridge_result.get("runner_result"))
+        if runtime_completion_mode is None:
+            runtime_completion_mode = self._coerce_runtime_completion_mode(final_payload)
+        if runtime_completion_mode is not None:
+            processed["runtime_completion_mode"] = runtime_completion_mode.value
         processed["runtime_session_id"] = bridge_result["session_id"]
         processed["steps"] = []
         processed["skill_route"] = bridge_result.get("skill_route") or {}
         processed["memory_counts"] = bridge_result.get("memory_counts") or {}
-        handoff = self._build_handoff(processed)
+        handoff = self._build_handoff(processed) if runtime_completion_mode is RuntimeCompletionMode.FINALIZE_TOOL else None
         if handoff:
             bridge.record_handoff(bridge_result["session_id"], handoff.to_dict())
             await self.emit_handoff_debug("out", handoff)
         await self.emit_llm_complete(processed.get("summary", "runtime finding complete"), 0)
+        incomplete_runtime = (
+            runtime_completion_mode in {RuntimeCompletionMode.INCOMPLETE, RuntimeCompletionMode.FALLBACK_RECOVERED}
+            or bool(processed.get("requires_retry"))
+            or processed.get("is_final") is False
+        )
+        if incomplete_runtime:
+            error = "Finding 未完成：runtime ended without FinalizeFinding or structured final findings."
+            return AgentResult(
+                success=False,
+                data=processed,
+                error=error,
+                iterations=int(bridge_result.get("turn_count") or 0),
+                tool_calls=int(bridge_result.get("tool_call_count") or 0),
+                tokens_used=0,
+                duration_ms=int((time.time() - start_time) * 1000),
+                metadata={
+                    "runtime_stack": FindingRuntimeStack.RUNTIME.value,
+                    "runtime_session_id": bridge_result["session_id"],
+                    **({"runtime_completion_mode": runtime_completion_mode.value} if runtime_completion_mode is not None else {}),
+                },
+                handoff=None,
+            )
         return AgentResult(
             success=True,
             data=processed,
@@ -335,9 +383,26 @@ class FindingAgent(AnalysisWorkflowAgent):
             metadata={
                 "runtime_stack": FindingRuntimeStack.RUNTIME.value,
                 "runtime_session_id": bridge_result["session_id"],
+                **({"runtime_completion_mode": runtime_completion_mode.value} if runtime_completion_mode is not None else {}),
             },
             handoff=handoff,
         )
+
+    @staticmethod
+    def _coerce_runtime_completion_mode(runner_result) -> RuntimeCompletionMode | None:
+        if runner_result is None:
+            return None
+        completion_mode = getattr(runner_result, "completion_mode", None)
+        if completion_mode is None and isinstance(runner_result, dict):
+            completion_mode = runner_result.get("completion_mode") or runner_result.get("runtime_completion_mode")
+        if completion_mode is None:
+            return None
+        if isinstance(completion_mode, RuntimeCompletionMode):
+            return completion_mode
+        try:
+            return RuntimeCompletionMode(str(completion_mode))
+        except ValueError:
+            return None
 
     async def run(self, input_data: Dict[str, Any]):
         if self._resolve_runtime_stack(input_data) is FindingRuntimeStack.RUNTIME:
@@ -416,13 +481,12 @@ class FindingAgent(AnalysisWorkflowAgent):
             return ""
         if self._runtime_state.phase == "report_finalization":
             return (
-                "Do not expand to new candidates. Consolidate the strongest existing evidence, "
-                "close the current exploit chain, and prepare the Final Answer from collected observations only."
+                "不要扩展新的候选方向。请整合当前最强证据，"
+                "闭合现有利用链，并只基于已收集的观察结果准备 Final Answer。"
             )
         return (
-            "Stay in evidence collection mode. Keep tracing the active candidate while runnable candidates or follow-up "
-            "budget still remain. Only switch to report_finalization after a closed exploit chain is proven or the queue "
-            "is saturated with no viable next candidate."
+            "保持证据收集模式。只要仍有可运行候选或跟进预算，就继续追踪当前候选。"
+            "只有在证明闭合利用链，或队列已饱和且没有可行下一候选时，才切换到 report_finalization。"
         )
 
     def _candidate_summary(self, candidate) -> Dict[str, Any]:
@@ -613,22 +677,24 @@ class FindingAgent(AnalysisWorkflowAgent):
         self._update_runtime_phase(iteration)
 
     def _build_preemptive_finalization_prompt(self, rounds_left: int) -> str:
+        if not self.GUIDED_REPORT_FINALIZATION_ENABLED:
+            return ""
         if rounds_left not in self.PREEMPTIVE_FINALIZATION_THRESHOLDS:
             return ""
         if rounds_left == 6:
             return (
-                "Stop expanding coverage. You are inside the final 6 reasoning rounds. "
-                "Switch from broad exploration to report_finalization preparation, keep the active candidate, "
-                "and consolidate only already collected evidence."
+                "停止扩展覆盖面。当前已经进入最后 6 轮推理。"
+                "请从广泛探索切换到 report_finalization 准备，保留当前活跃候选，"
+                "并只整合已经收集到的证据。"
             )
         if rounds_left == 3:
             return (
-                "Merge the strongest existing evidence now. No new candidates, no broad search, and no extra coverage passes. "
-                "Use the remaining rounds to finish exploit_chain, poc, impact, and cve_justification from current observations."
+                "现在合并已有最强证据。不要新增候选，不要广泛搜索，也不要额外扩展覆盖面。"
+                "请用剩余轮次基于当前观察结果补齐 exploit_chain、poc、impact 和 cve_justification。"
             )
         return (
-            "Return Final Answer immediately. Do not emit another Action unless it is strictly required to format the final report. "
-            "Use only already collected evidence and produce the compliant final vulnerability JSON now."
+            "请立即返回 Final Answer。除非格式化最终报告绝对需要，否则不要再输出 Action。"
+            "只能使用已收集证据，并立刻生成符合要求的最终漏洞 JSON。"
         )
 
     def _build_iteration_control_prompt(self) -> str:
@@ -642,6 +708,8 @@ class FindingAgent(AnalysisWorkflowAgent):
         return prompt
 
     def _final_only_mode_active(self, current_iteration: Optional[int] = None) -> bool:
+        if not self.GUIDED_REPORT_FINALIZATION_ENABLED:
+            return False
         if not self._runtime_state:
             return False
         if self._runtime_state.phase != "report_finalization":
@@ -656,8 +724,8 @@ class FindingAgent(AnalysisWorkflowAgent):
     def _build_no_action_prompt(self) -> str:
         if self._final_only_mode_active():
             return (
-                "Finalization lock active. No more tools. Return a compliant Final Answer immediately "
-                "using only the already collected evidence."
+                "最终化锁定已生效。不要再使用工具。请只基于已收集证据，"
+                "立即返回符合要求的 Final Answer。"
             )
         return super()._build_no_action_prompt()
 
@@ -792,9 +860,9 @@ class FindingAgent(AnalysisWorkflowAgent):
         primary_skill = str(self._skill_bootstrap_state.get("primary_skill", "") or "").strip()
         skill_file_path = str(self._skill_bootstrap_state.get("skill_file_path", "") or "").strip()
         return (
-            "Primary audit skill bootstrap is still required. "
-            f"Read the primary skill file for {primary_skill} first with read_file(file_path=\"{skill_file_path}\") "
-            "or include that exact path in read_many_files before using general audit tools."
+            "仍需先启动主审计技能。"
+            f"请先用 Read 读取 {primary_skill} 的主技能文件：{skill_file_path}，"
+            "然后再使用通用审计工具。"
         )
 
     @staticmethod
@@ -805,11 +873,11 @@ class FindingAgent(AnalysisWorkflowAgent):
     @staticmethod
     def _compatibility_skill_tool_observation(invocation) -> str:
         action_input = invocation.action_input or {}
-        skill_ref = str(action_input.get("skill_ref") or "").strip() or "the active skill"
+        skill_ref = str(action_input.get("skill_ref") or "").strip() or "当前活跃技能"
         return (
-            f"Do not use {invocation.action} for Finding runtime skill loading. "
-            f"Read {skill_ref}'s catalog paths with generic file tools instead: "
-            "read_file(skill_file_path), list_files(references_root), and read_many_files([...])."
+            f"不要使用 {invocation.action} 加载 Finding runtime 技能。"
+            f"璇锋敼鐢ㄩ€氱敤鏂囦欢宸ュ叿璇诲彇 {skill_ref} 鐨勭洰褰曡矾寰勶細"
+            "使用 Read 读取 skill_file_path，并在 references_root 下使用 Glob/Grep 定位参考文件。"
         )
 
     def _build_iteration_messages(self) -> List[Dict[str, str]]:
@@ -849,7 +917,7 @@ class FindingAgent(AnalysisWorkflowAgent):
             self._conversation_history[1],
             {
                 "role": "user",
-                "content": "Active candidate local context:\n"
+                "content": "当前候选本地上下文：\n"
                 + json.dumps(context_block, ensure_ascii=False, indent=2),
             },
             *session.message_history[-8:],
@@ -876,6 +944,8 @@ class FindingAgent(AnalysisWorkflowAgent):
         return f"Observation ({action}):\n{compact}"
 
     def _should_skip_full_history_finalization(self) -> bool:
+        if not self.GUIDED_REPORT_FINALIZATION_ENABLED:
+            return True
         return self._total_tokens >= self.HISTORY_FINALIZATION_TOKEN_THRESHOLD
 
     def _current_candidate(self):
@@ -983,8 +1053,8 @@ class FindingAgent(AnalysisWorkflowAgent):
     async def _execute_step_actions(self, step, failed_tool_calls: Dict[str, int]) -> str:
         if self._final_only_mode_active():
             return (
-                "Finalization lock active. No more tools may run in final-only mode. "
-                "Return Final Answer immediately using only the evidence already collected."
+                "最终化锁定已生效。在 final-only 模式下不能再运行工具。"
+                "请只使用已收集证据，立即返回 Final Answer。"
             )
         observations: List[str] = []
         active_candidate = self._current_candidate()
@@ -1020,7 +1090,7 @@ class FindingAgent(AnalysisWorkflowAgent):
             if isinstance(observation, str) and "Error" in observation:
                 failed_tool_calls[tool_call_key] = failed_tool_calls.get(tool_call_key, 0) + 1
                 if failed_tool_calls[tool_call_key] >= 3:
-                    observation += "\nRepeated tool failure detected. Switch tools, narrow the scope, or produce Final Answer."
+                    observation += "\n检测到重复工具失败。请切换工具、缩小范围，或产出 Final Answer。"
                     failed_tool_calls[tool_call_key] = 0
             else:
                 failed_tool_calls.pop(tool_call_key, None)
@@ -1161,47 +1231,44 @@ class FindingAgent(AnalysisWorkflowAgent):
 
         recon_summary = ((recon_data.get("summary") or recon_data.get("data", {}).get("summary") or "").strip())
         if not recon_summary:
-            recon_summary = "Recon context was incomplete, so this prompt falls back to repository structure and direct source review."
+            recon_summary = "Recon 上下文不完整，本次审计将基于仓库结构和直接源码阅读继续推进。"
 
-        message = f"""Review the repository directly and look for any CVE-grade vulnerabilities that can be justified from source code evidence.
+        message = f"""请直接审计代码仓库，寻找有源码证据支撑的 CVE 级漏洞。除代码、路径、函数名、工具名和漏洞英文缩写外，审计说明请使用简体中文。
+项目信息：
+- 名称：{project_info.get('name', 'unknown')}
+- 根目录：{project_info.get('root', '.')}
+- 语言：{json.dumps(languages, ensure_ascii=False)}
+- 框架：{json.dumps(frameworks, ensure_ascii=False)}
+- 数据库：{json.dumps(databases, ensure_ascii=False)}
 
-Project information:
-- Name: {project_info.get('name', 'unknown')}
-- Root directory: {project_info.get('root', '.')}
-- Languages: {json.dumps(languages, ensure_ascii=False)}
-- Frameworks: {json.dumps(frameworks, ensure_ascii=False)}
-- Databases: {json.dumps(databases, ensure_ascii=False)}
-
-Priority paths:
+优先路径：
 {json.dumps(priority_paths[:25], ensure_ascii=False, indent=2)}
 
-Entry points:
+入口点：
 {json.dumps(entry_points, ensure_ascii=False, indent=2)}
 
-Target files:
+目标文件：
 {json.dumps(target_files[:50], ensure_ascii=False, indent=2)}
 
-Exclude patterns:
+排除模式：
 {json.dumps(exclude_patterns[:20], ensure_ascii=False, indent=2)}
 
-Recommended scanners:
+推荐扫描器：
 {json.dumps(recommended_scanners, ensure_ascii=False, indent=2)}
 
-Recon summary:
-{recon_summary}
+Recon 摘要：{recon_summary}
 
-Audit task context:
-User-provided audit hints:
+审计任务上下文：
+用户提供的审计提示：
 {json.dumps(focus_hints, ensure_ascii=False, indent=2)}
 
-{task_context or 'No extra task context provided.'}
+{task_context or '未提供额外任务上下文。'}
 
-Audit priorities:
-- Prioritize target files > entry points > priority paths > auth/authz chains > sensitive state changes > multi-step business logic.
-- Consider any externally triggerable CVE-grade issue. Do not narrow the audit to preset vulnerability families.
-- Do not rely on Scan Agent output. Base conclusions on direct code reading and reasoning.
-- Keep reviewing until you can either prove a CVE-grade exploit chain or explain why the current candidate does not meet that bar.
-"""
+审计优先级：
+- 优先审计目标文件、入口点、优先路径、认证鉴权链、敏感状态变更和多步业务逻辑。
+- 关注任何可由外部触发且达到 CVE 级别的问题，不要只局限于预设漏洞类型。
+- 不要依赖 Scan Agent 输出；结论必须基于直接源码阅读和推理。
+- 持续审计，直到能证明一条 CVE 级利用链，或说明当前候选为什么达不到报告标准。"""
         message = message + "\n\n" + skill_guidance
         preloaded_skill_context = context.get("preloaded_skill_context")
         if preloaded_skill_context:
@@ -1234,41 +1301,41 @@ Audit priorities:
                 "uncovered_priority_paths": runtime_state.coverage.uncovered_priority_paths[:20],
                 "authz_paths": runtime_state.coverage.authz_paths[:12],
                 "active_candidate_id": runtime_state.active_candidate_id,
-                "phase_transition_rules": [
-                    "Switch to report_finalization when a closed exploit-chain candidate exists.",
-                    "Stay in evidence_collection while runnable candidates or follow-up budget still remain.",
-                    "Switch to report_finalization when the queue is saturated and only report-ready evidence remains.",
-                    "While finalizing, keep the strongest current candidate and stop opening new candidates.",
+                    "phase_transition_rules": [
+                        "当存在已闭合利用链的候选时，切换到 report_finalization。",
+                        "只要仍有可运行候选或跟进预算，就保持 evidence_collection。",
+                        "当队列已饱和且只剩可进入报告的证据时，切换到 report_finalization。",
+                        "最终化期间保留当前最强候选，停止开启新候选。",
                 ],
             }
             generation_summary = {
-                "Initial queue generation rules": {
+                "初始队列生成规则": {
                     "max_active_candidates": runtime_state.plan.max_active_candidates,
                     "initial_queue_suppressed": runtime_state.metrics.get("queue.initial_suppressed_candidates", 0),
                     "generation_rules": [
-                        "Keep the active seed queue within max_active_candidates.",
-                        "Prefer vulnerability-family diversity before filling remaining seed slots.",
-                        "Push overflow candidates into discarded_candidates with discard_reason=initial_queue_cap.",
+                        "保持活跃种子队列不超过 max_active_candidates。",
+                        "填充剩余种子槽位前，优先保证漏洞类型多样性。",
+                        "超额候选放入 discarded_candidates，并设置 discard_reason=initial_queue_cap。",
                     ],
                 }
             }
             message = (
                 message
-                + "\n\nCoverage-first runtime plan:\n"
+                + "\n\n覆盖优先运行计划：\n"
                 + json.dumps(coverage_summary, ensure_ascii=False, indent=2)
-                + "\n\nInitial queue generation rules:\n"
+                + "\n\n初始队列生成规则：\n"
                 + json.dumps(generation_summary, ensure_ascii=False, indent=2)
-                + "\n\nInitial candidate queue:\n"
+                + "\n\n初始候选队列：\n"
                 + json.dumps(queue_preview, ensure_ascii=False, indent=2)
             )
         return message
 
     def _build_summary_prompt(self) -> str:
         return (
-            "Stop now and deliver the final source-code vulnerability report. "
-            "Return at most 3 highest-value findings that already have a closed exploit chain in prior observations. "
-            "If dynamic verification has not been run, keep verdict='candidate' and explain the remaining evidence gap in verification_notes. "
-            "Do not emit another Action. Return either 'Final Answer: {...}' or pure JSON only."
+            "现在停止并交付最终源码漏洞报告。"
+            "最多返回 3 个已经在先前观察中闭合利用链的最高价值发现。"
+            "如果尚未运行动态验证，请保持 verdict='candidate'，并在 verification_notes 中说明剩余证据缺口。"
+            "不要再输出 Action。只能返回 'Final Answer: {...}' 或纯 JSON。"
         )
 
     async def _recover_final_result(self) -> Dict[str, Any]:
@@ -1279,6 +1346,12 @@ Audit priorities:
         synthesized = self._synthesizer.synthesize(self._runtime_state, self._evidence_store)
         if synthesized.get(self.output_key):
             return synthesized
+
+        if not self.GUIDED_REPORT_FINALIZATION_ENABLED:
+            return {
+                self.output_key: [],
+                "summary": self._build_timeout_summary(),
+            }
 
         compact_evidence = self._build_compact_recovery_evidence()
         if not compact_evidence:
@@ -1291,18 +1364,18 @@ Audit priorities:
             {
                 "role": "system",
                 "content": (
-                    "You are finalizing a source-code vulnerability report from already collected audit evidence. "
-                    "Do not ask for more tools. Return JSON only. "
-                    "Each finding must include vulnerability_type, severity, title, description, file_path, line_start, line_end, "
-                    "source, sink, suggestion, confidence, verdict, impact, cve_justification, verification_notes, exploit_chain, "
-                    "poc, entry_point_refs, priority_path_refs, business_flow_notes, evidence_gaps."
+                    "你正在基于已经收集到的审计证据最终化源码漏洞报告。"
+                    "不要请求更多工具，只返回 JSON。"
+                    "每个 finding 必须包含 vulnerability_type、severity、title、description、file_path、line_start、line_end、"
+                    "source、sink、suggestion、confidence、verdict、impact、cve_justification、verification_notes、exploit_chain、"
+                    "poc、entry_point_refs、priority_path_refs、business_flow_notes、evidence_gaps。"
                 ),
             },
             {
                 "role": "user",
                 "content": (
-                    "Based only on the compact evidence below, produce the best supported final report. "
-                    "Keep unsupported items out. Prefer 1-3 high-value findings.\n\n"
+                    "只基于下面的压缩证据，产出证据最充分的最终报告。"
+                    "涓嶈鍖呭惈缂轰箯鏀拺鐨勬潯鐩紝浼樺厛杩斿洖 1-3 涓珮浠峰€煎彂鐜般€俓n\n"
                     f"{compact_evidence}"
                 ),
             },
@@ -1391,18 +1464,18 @@ Audit priorities:
         if recent_artifacts:
             artifact_text = "; ".join(recent_artifacts)
             return (
-                f"Finalization timed out after {self._iteration} reasoning steps and {self._tool_calls} tool calls. "
-                f"The audit reached these hotspots before stopping: {artifact_text}. "
-                "No CVE-grade finding could be finalized from the collected evidence before the LLM timed out. "
-                "This fallback summary reflects the latest audited code paths and should be reviewed to continue the investigation. "
-                "Finding did not produce a compliant Final Answer."
+                f"最终化在 {self._iteration} 轮推理、{self._tool_calls} 次工具调用后超时。"
+                f"审计在停止前到达这些热点：{artifact_text}。"
+                "LLM 超时前，尚无法从已收集证据最终化 CVE 级发现。"
+                "这个兜底总结反映了最近审计过的代码路径，后续应从这些位置继续调查。"
+                "Finding 没有产出符合要求的 Final Answer。"
             )
 
         return (
-            f"Finalization timed out after {self._iteration} reasoning steps and {self._tool_calls} tool calls. "
-            "The audit did not reach a compliant CVE-grade conclusion before the LLM timed out. "
-            "This fallback summary indicates an incomplete finalization rather than a confirmed clean result. "
-            "Finding did not produce a compliant Final Answer."
+            f"最终化在 {self._iteration} 轮推理、{self._tool_calls} 次工具调用后超时。"
+            "LLM 超时前，审计尚未得到符合要求的 CVE 级结论。"
+            "这个兜底总结表示最终化未完成，并不代表确认无漏洞。"
+            "Finding 没有产出符合要求的 Final Answer。"
         )
 
     def _trim_observation(self, observation: str, max_length: int = 1200) -> str:
@@ -1476,10 +1549,10 @@ Audit priorities:
 
     def _extract_file_context(self, observation: str) -> Optional[Dict[str, Any]]:
         text = str(observation or "")
-        file_match = re.search(r"闂佸搫鍊稿ú锝呪枎?\s*(.+)", text)
+        file_match = re.search(r"闂備礁鎼崐绋棵洪敐鍛瀻?\s*(.+)", text)
         if not file_match:
             return None
-        line_match = re.search(r"闁荤偞绋戦張顒勫汲?\s*(\d+)(?:-(\d+))?", text)
+        line_match = re.search(r"闂佽崵鍋炵粙鎴﹀嫉椤掑嫬姹?\s*(\d+)(?:-(\d+))?", text)
         snippet_match = re.search(r"```[a-zA-Z0-9_]*\n(.*?)```", text, re.DOTALL)
         line_start = int(line_match.group(1)) if line_match else 1
         line_end = int(line_match.group(2) or line_start) if line_match else line_start
@@ -1582,6 +1655,16 @@ Audit priorities:
 
     def _postprocess_result(self, raw_result: Dict[str, Any]) -> Dict[str, Any]:
         processed = super()._postprocess_result(raw_result)
+        recovered_candidates = []
+        for candidate in raw_result.get("recovered_candidates", []):
+            if isinstance(candidate, dict):
+                normalized = self._normalize_finding(candidate)
+                normalized["origin"] = str(candidate.get("origin") or "transcript_recovery")
+                normalized["report_status"] = str(candidate.get("report_status") or "recovered_candidate")
+                normalized["evidence_type"] = str(candidate.get("evidence_type") or "transcript_recovery")
+                normalized["not_finalized"] = bool(candidate.get("not_finalized", True))
+                recovered_candidates.append(normalized)
+
         enriched = []
         for finding in processed.get("findings", []):
             evidence_gaps = list(finding.get("evidence_gaps", []))
@@ -1605,6 +1688,8 @@ Audit priorities:
             enriched.append(finding)
 
         processed["findings"] = enriched
+        if recovered_candidates:
+            processed["recovered_candidates"] = recovered_candidates
         return processed
 
     def _build_handoff(self, processed_result):

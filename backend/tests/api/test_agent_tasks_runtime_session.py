@@ -231,6 +231,124 @@ async def test_agent_task_routes_include_runtime_session_id():
 
 
 @pytest.mark.asyncio
+async def test_agent_task_detail_exposes_finding_outcome_semantics():
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    now = datetime.now(timezone.utc)
+    async with session_factory() as db:
+        user = User(
+            id='user-1',
+            email='owner@example.com',
+            hashed_password='not-a-real-hash',
+            full_name='Owner',
+            is_active=True,
+        )
+        project = Project(
+            id='project-1',
+            name='Demo Project',
+            owner_id='user-1',
+            source_type='repository',
+        )
+        recovered_task = AgentTask(
+            id='task-recovered',
+            project_id='project-1',
+            created_by='user-1',
+            name='Recovered task',
+            version_label='runtime-test',
+            status=AgentTaskStatus.COMPLETED,
+            current_phase='reporting',
+            created_at=now,
+            agent_config={
+                'finding_runtime_stack': 'runtime',
+                'finding_runtime_result': {
+                    'finding_outcome': 'recovered_only',
+                    'runtime_completion_mode': 'fallback_recovered',
+                    'finalized_findings_count': 0,
+                    'recovered_candidates_count': 1,
+                    'handoff_ready': False,
+                    'recovered_candidates': [
+                        {
+                            'title': 'Recovered SSRF candidate',
+                            'severity': 'high',
+                            'vulnerability_type': 'ssrf',
+                            'description': 'Recovered from transcript only.',
+                            'file_path': 'src/demo.py',
+                            'line_start': 42,
+                            'report_status': 'recovered_candidate',
+                            'origin': 'transcript_recovery',
+                            'evidence_type': 'transcript_recovery',
+                            'not_finalized': True,
+                        }
+                    ],
+                },
+            },
+        )
+        finalized_task = AgentTask(
+            id='task-finalized',
+            project_id='project-1',
+            created_by='user-1',
+            name='Finalized task',
+            version_label='runtime-test',
+            status=AgentTaskStatus.COMPLETED,
+            current_phase='reporting',
+            created_at=now,
+            findings_count=2,
+            high_count=2,
+            agent_config={
+                'finding_runtime_stack': 'runtime',
+                'finding_runtime_result': {
+                    'finding_outcome': 'finalized',
+                    'runtime_completion_mode': 'finalize_tool',
+                    'finalized_findings_count': 2,
+                    'recovered_candidates_count': 0,
+                    'handoff_ready': True,
+                    'recovered_candidates': [],
+                },
+            },
+        )
+        db.add_all([user, project, recovered_task, finalized_task])
+        await db.commit()
+
+    app = build_test_app()
+
+    async def override_get_db():
+        async with session_factory() as db:
+            yield db
+
+    async def override_get_current_user():
+        return SimpleNamespace(id='user-1', is_active=True)
+
+    app.dependency_overrides[deps.get_db] = override_get_db
+    app.dependency_overrides[deps.get_current_user] = override_get_current_user
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://testserver') as client:
+        recovered_response = await client.get('/api/v1/agent-tasks/task-recovered')
+        finalized_response = await client.get('/api/v1/agent-tasks/task-finalized')
+
+    await engine.dispose()
+
+    assert recovered_response.status_code == 200
+    assert recovered_response.json()['finding_outcome'] == 'recovered_only'
+    assert recovered_response.json()['runtime_completion_mode'] == 'fallback_recovered'
+    assert recovered_response.json()['finalized_findings_count'] == 0
+    assert recovered_response.json()['recovered_candidates_count'] == 1
+    assert recovered_response.json()['handoff_ready'] is False
+    assert recovered_response.json()['recovered_candidates'][0]['title'] == 'Recovered SSRF candidate'
+
+    assert finalized_response.status_code == 200
+    assert finalized_response.json()['finding_outcome'] == 'finalized'
+    assert finalized_response.json()['runtime_completion_mode'] == 'finalize_tool'
+    assert finalized_response.json()['finalized_findings_count'] == 2
+    assert finalized_response.json()['recovered_candidates_count'] == 0
+    assert finalized_response.json()['handoff_ready'] is True
+
+
+@pytest.mark.asyncio
 async def test_create_agent_task_persists_runtime_stack_in_agent_config(monkeypatch):
     engine = create_async_engine('sqlite+aiosqlite:///:memory:')
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
@@ -487,6 +605,77 @@ async def test_agent_task_events_list_returns_history_for_activity_log():
     assert payload[0]['event_type'] == AgentEventType.THINKING
     assert payload[0]['timestamp']
     assert payload[0]['created_at']
+
+
+@pytest.mark.asyncio
+async def test_stream_agent_events_does_not_require_progress_percent_attribute():
+    engine = create_async_engine('sqlite+aiosqlite:///:memory:')
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        user = User(
+            id='user-1',
+            email='owner@example.com',
+            hashed_password='not-a-real-hash',
+            full_name='Owner',
+            is_active=True,
+        )
+        project = Project(
+            id='project-1',
+            name='Demo Project',
+            owner_id='user-1',
+            source_type='repository',
+        )
+        task = AgentTask(
+            id='task-1',
+            project_id='project-1',
+            created_by='user-1',
+            name='Audit demo',
+            version_label='runtime-test',
+            status=AgentTaskStatus.CANCELLED,
+            current_phase='analysis',
+            created_at=datetime.now(timezone.utc),
+        )
+        event = AgentEvent(
+            id='event-1',
+            task_id='task-1',
+            event_type=AgentEventType.THINKING,
+            sequence=1,
+            phase='analysis',
+            message='thinking...',
+            event_metadata={'progress_percent': 30},
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add_all([user, project, task, event])
+        await db.commit()
+
+    app = build_test_app()
+
+    async def override_get_db():
+        async with session_factory() as db:
+            yield db
+
+    async def override_get_current_user():
+        return SimpleNamespace(id='user-1', is_active=True)
+
+    app.dependency_overrides[deps.get_db] = override_get_db
+    app.dependency_overrides[deps.get_current_user] = override_get_current_user
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(agent_tasks_endpoint, 'async_session_factory', session_factory, raising=False)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url='http://testserver') as client:
+        response = await client.get('/api/v1/agent-tasks/task-1/events')
+
+    await engine.dispose()
+    monkeypatch.undo()
+
+    assert response.status_code == 200
+    assert '"progress_percent": 30' in response.text
+    assert '"type": "task_end"' in response.text
 
 
 @pytest.mark.asyncio
@@ -790,6 +979,15 @@ async def test_auto_generate_managed_reports_runs_when_verification_config_missi
 
     assert stats == {'generated': 1, 'failed': 0, 'skipped': 0}
     assert managed.report_generation_status == 'completed'
+
+
+def test_disabled_managed_report_stats_skips_all_persisted_findings():
+    stats = agent_tasks_endpoint._disabled_managed_report_stats(
+        [SimpleNamespace(id='finding-1'), SimpleNamespace(id='finding-2')]
+    )
+
+    assert agent_tasks_endpoint.AUTO_MANAGED_REPORT_POSTPROCESSING_ENABLED is False
+    assert stats == {'generated': 0, 'failed': 0, 'skipped': 2}
 
 
 @pytest.mark.asyncio

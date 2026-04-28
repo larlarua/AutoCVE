@@ -11,7 +11,7 @@ from app.services.runtime_core.skill_discovery import SkillDiscoveryScheduler
 
 
 class FindingRuntimeAdapter:
-    DEFAULT_USER_MESSAGE = "Continue the audit with the current Finding objective."
+    DEFAULT_USER_MESSAGE = "请继续围绕当前 Finding 目标进行审计"
 
     def __init__(
         self,
@@ -204,7 +204,7 @@ class FindingRuntimeAdapter:
                 ).strip()
                 if not skill_text:
                     skill_text = str(skill_body)
-                skill_bootstrap_text = f"Primary skill bootstrap: {primary_skill}\n\n{skill_text[:6000]}"
+                skill_bootstrap_text = f"主技能启动内容：{primary_skill}\n\n{skill_text[:6000]}"
         return skill_context, skill_bootstrap_text, discovery_snapshot
 
     def _apply_discovery_snapshot(self, skill_context, discovery_snapshot: dict[str, object]) -> None:

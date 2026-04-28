@@ -45,7 +45,9 @@ TEXT_EXTENSIONS = [
 # 排除的目录和文件模式
 EXCLUDE_PATTERNS = [
     "node_modules/", "vendor/", "dist/", "build/", ".git/",
-    "__pycache__/", ".pytest_cache/", "coverage/", ".nyc_output/",
+    "__pycache__/", ".pytest_cache/", ".venv/", "venv/", "env/",
+    ".tox/", ".mypy_cache/", ".ruff_cache/", ".next/", ".nuxt/",
+    ".cache/", "coverage/", ".nyc_output/",
     ".vscode/", ".idea/", ".vs/", "target/", "out/",
     "__MACOSX/", ".DS_Store", "package-lock.json", "yarn.lock",
     "pnpm-lock.yaml", ".min.js", ".min.css", ".map"

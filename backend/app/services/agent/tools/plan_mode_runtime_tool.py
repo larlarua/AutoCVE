@@ -13,11 +13,11 @@ class PlanModeInput(BaseModel):
 
 class EnterPlanModeRuntimeTool(RuntimeTool):
     name = "EnterPlanMode"
-    description = "Enter shared plan mode for the current session"
+    description = "让当前会话进入共享计划模式"
     input_model = PlanModeInput
     should_defer = True
     always_load = True
-    search_hint = "enter plan mode"
+    search_hint = "进入计划模式"
 
     def __init__(self, session_store):
         super().__init__()
@@ -33,7 +33,7 @@ class EnterPlanModeRuntimeTool(RuntimeTool):
         )
         self._session_store.replace_runtime_state(context.session_id, runtime_state)
         return ToolExecutionPayload(
-            content="Plan mode enabled",
+            content="计划模式已启用",
             output_payload={"plan_mode": plan_state},
             metadata={"interaction": "plan_mode_enter"},
         )
@@ -41,11 +41,11 @@ class EnterPlanModeRuntimeTool(RuntimeTool):
 
 class ExitPlanModeRuntimeTool(RuntimeTool):
     name = "ExitPlanMode"
-    description = "Exit shared plan mode for the current session"
+    description = "让当前会话退出共享计划模式"
     input_model = PlanModeInput
     should_defer = True
     always_load = True
-    search_hint = "exit plan mode"
+    search_hint = "退出计划模式"
 
     def __init__(self, session_store):
         super().__init__()
@@ -61,7 +61,7 @@ class ExitPlanModeRuntimeTool(RuntimeTool):
         )
         self._session_store.replace_runtime_state(context.session_id, runtime_state)
         return ToolExecutionPayload(
-            content="Plan mode disabled",
+            content="计划模式已关闭",
             output_payload={"plan_mode": plan_state},
             metadata={"interaction": "plan_mode_exit"},
         )

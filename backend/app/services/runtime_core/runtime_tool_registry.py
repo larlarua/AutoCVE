@@ -11,6 +11,7 @@ from app.services.agent.tools.plan_mode_runtime_tool import EnterPlanModeRuntime
 from app.services.agent.tools.todo_runtime_tool import TodoWriteRuntimeTool
 from app.services.finding_runtime.models import ToolExecutionPayload
 from app.services.finding_runtime.skills import RuntimeSkillTool
+from app.services.finding_runtime.tools.finalize_finding import FinalizeFindingTool
 from app.services.runtime_core.permission_runtime import ToolPermissionDecision
 from app.services.runtime_core.runtime_guardrails import (
     APPROVAL_SCOPE_SINGLE_USE,
@@ -83,8 +84,8 @@ def _infer_project_root(agent_tools: dict[str, AgentTool]) -> str | None:
 class CanonicalReadTool(RuntimeTool):
     name = "Read"
     description = (
-        "Read one file or a small batch of closely related files from the project. "
-        "Prefer this for controllers, services, config, SQL, XML, and skill reference files."
+        "读取项目中的单个文件，或读取少量密切相关的文件。"
+        "适合控制器、服务、配置、SQL、XML 和技能参考文件。"
     )
     input_model = ReadToolInput
 
@@ -137,7 +138,7 @@ class CanonicalReadTool(RuntimeTool):
 
 class CanonicalGlobTool(RuntimeTool):
     name = "Glob"
-    description = "List files under the project root with an optional glob filter."
+    description = "按 glob 模式列出项目目录下的文件。"
     input_model = GlobToolInput
 
     def __init__(self, *, list_tool: AgentTool):
@@ -169,7 +170,7 @@ class CanonicalGlobTool(RuntimeTool):
 
 class CanonicalGrepTool(RuntimeTool):
     name = "Grep"
-    description = "Search code or config text across the repository with regex or keyword matching."
+    description = "使用正则或关键字在代码和配置文本中搜索。"
     input_model = GrepToolInput
 
     def __init__(self, *, search_tool: AgentTool):
@@ -206,9 +207,9 @@ class CanonicalGrepTool(RuntimeTool):
 class CanonicalWriteTool(RuntimeTool):
     name = "Write"
     description = (
-        "Write a text artifact for the current audit session. "
-        "Managed outputs are allowed under .auditai/. "
-        "When guardrails are enabled, writes to source files or outside the project root require explicit user approval."
+        "为当前审计会话写入文本产物。"
+        "托管输出允许写入 .auditai/ 目录。"
+        "启用护栏时，写入源码文件或项目根目录外的位置需要用户明确批准。"
     )
     input_model = WriteToolInput
 
@@ -352,7 +353,7 @@ class CanonicalWriteTool(RuntimeTool):
                     allowed=False,
                     source="tool_guardrail",
                     mode="ask",
-                    reason="Writing source files requires explicit approval. Use .auditai/ for generated audit artifacts.",
+                    reason="写入源码文件需要明确批准。生成的审计产物请写入 .auditai/。",
                     guardrail_code="source_write_requires_approval",
                 )
 
@@ -502,6 +503,8 @@ def build_runtime_tool_registry(*, session_store, agent_tools: dict[str, AgentTo
             user_id=user_id,
         )
     )
+    if str(agent_type or "").strip() == "finding":
+        tools.append(FinalizeFindingTool())
     tools.extend(
         [
             TodoWriteRuntimeTool(session_store),

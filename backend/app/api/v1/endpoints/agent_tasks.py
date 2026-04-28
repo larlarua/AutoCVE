@@ -4,6 +4,7 @@ AuditAI Agent 闂佽楠搁婵嬪Χ鎼粹剝鍊庡┑鐐差嚟婵箖顢�
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import copy
@@ -34,6 +35,7 @@ from app.models.agent_task import (
 )
 from app.models.audit_session import AuditSession, AuditSessionMessage
 from app.services.finding_runtime.config import FindingRuntimeStack, coerce_finding_runtime_stack
+from app.services.finding_runtime.final_finding_contract import has_meaningful_poc, is_placeholder_finding
 from app.models.project import Project
 from app.models.user import User
 from app.models.user_config import UserConfig
@@ -47,6 +49,10 @@ from app.core.encryption import decrypt_sensitive_data
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Temporarily disable automatic managed-report post-processing after findings are persisted.
+# Manual report-generation entry points can still invoke the report pipeline explicitly.
+AUTO_MANAGED_REPORT_POSTPROCESSING_ENABLED = False
 
 # Running task registry kept for cancellation and legacy task lookups.
 _running_tasks: Dict[str, Any] = {}
@@ -152,6 +158,12 @@ class AgentTaskResponse(BaseModel):
     error_message: Optional[str] = None
     runtime_session_id: Optional[str] = None
     finding_runtime_stack: str = FindingRuntimeStack.RUNTIME.value
+    finding_outcome: str = "none"
+    runtime_completion_mode: Optional[str] = None
+    finalized_findings_count: int = 0
+    recovered_candidates_count: int = 0
+    handoff_ready: bool = False
+    recovered_candidates: List[Dict[str, Any]] = Field(default_factory=list)
     
     class Config:
         from_attributes = True
@@ -303,6 +315,122 @@ def _resolve_task_runtime_stack(agent_config: Any) -> str:
     if raw_value in (None, ""):
         raw_value = getattr(settings, "FINDING_RUNTIME_STACK_DEFAULT", FindingRuntimeStack.LEGACY.value)
     return coerce_finding_runtime_stack(raw_value).value
+
+
+def _extract_finding_runtime_payload(result_data: Any) -> Dict[str, Any]:
+    if not isinstance(result_data, dict):
+        return {}
+    if any(key in result_data for key in ("runtime_completion_mode", "recovered_candidates", "findings")):
+        return result_data
+    phases = result_data.get("phases")
+    if not isinstance(phases, dict):
+        return {}
+    finding_phase = phases.get("finding")
+    if not isinstance(finding_phase, dict):
+        return {}
+    data = finding_phase.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def _normalize_recovered_candidate(candidate: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(candidate, dict):
+        return None
+    normalized = {
+        "title": str(candidate.get("title") or candidate.get("vulnerability_type") or "Recovered candidate"),
+        "severity": str(candidate.get("severity") or "medium"),
+        "vulnerability_type": str(candidate.get("vulnerability_type") or "other"),
+        "description": candidate.get("description"),
+        "file_path": candidate.get("file_path"),
+        "line_start": candidate.get("line_start"),
+        "line_end": candidate.get("line_end"),
+        "report_status": candidate.get("report_status") or "recovered_candidate",
+        "verdict": candidate.get("verdict"),
+        "origin": candidate.get("origin") or "transcript_recovery",
+        "evidence_type": candidate.get("evidence_type") or "transcript_recovery",
+        "not_finalized": bool(candidate.get("not_finalized", True)),
+        "source": candidate.get("source"),
+        "sink": candidate.get("sink"),
+        "impact": candidate.get("impact"),
+        "cve_justification": candidate.get("cve_justification"),
+        "verification_notes": candidate.get("verification_notes"),
+        "exploit_chain": candidate.get("exploit_chain") or [],
+        "references": candidate.get("references") or [],
+        "evidence_gaps": candidate.get("evidence_gaps") or [],
+    }
+    return normalized
+
+
+def _build_finding_runtime_result_snapshot(
+    *,
+    persisted_findings_count: int,
+    finding_payload: Dict[str, Any],
+    handoff: Any = None,
+) -> Dict[str, Any]:
+    runtime_completion_mode = finding_payload.get("runtime_completion_mode")
+    recovered_candidates = [
+        normalized
+        for normalized in (
+            _normalize_recovered_candidate(candidate)
+            for candidate in (finding_payload.get("recovered_candidates") or [])
+        )
+        if normalized is not None
+    ]
+    finalized_findings_count = int(persisted_findings_count or 0)
+    recovered_candidates_count = len(recovered_candidates)
+    handoff_ready = bool(handoff) and runtime_completion_mode == "finalize_tool"
+
+    if finalized_findings_count > 0:
+        finding_outcome = "finalized"
+    elif recovered_candidates_count > 0:
+        finding_outcome = "recovered_only"
+    elif runtime_completion_mode == "incomplete":
+        finding_outcome = "incomplete"
+    else:
+        finding_outcome = "none"
+
+    return {
+        "finding_outcome": finding_outcome,
+        "runtime_completion_mode": runtime_completion_mode,
+        "finalized_findings_count": finalized_findings_count,
+        "recovered_candidates_count": recovered_candidates_count,
+        "handoff_ready": handoff_ready,
+        "recovered_candidates": recovered_candidates,
+    }
+
+
+def _get_task_finding_runtime_result(task: AgentTask) -> Dict[str, Any]:
+    agent_config = dict(task.agent_config or {})
+    stored = agent_config.get("finding_runtime_result")
+    if isinstance(stored, dict):
+        snapshot = {
+            "finding_outcome": str(stored.get("finding_outcome") or "none"),
+            "runtime_completion_mode": stored.get("runtime_completion_mode"),
+            "finalized_findings_count": int(stored.get("finalized_findings_count") or 0),
+            "recovered_candidates_count": int(stored.get("recovered_candidates_count") or 0),
+            "handoff_ready": bool(stored.get("handoff_ready", False)),
+            "recovered_candidates": [
+                normalized
+                for normalized in (
+                    _normalize_recovered_candidate(candidate)
+                    for candidate in (stored.get("recovered_candidates") or [])
+                )
+                if normalized is not None
+            ],
+        }
+        snapshot["recovered_candidates_count"] = len(snapshot["recovered_candidates"]) or snapshot["recovered_candidates_count"]
+        return snapshot
+
+    findings_count = int(task.findings_count or 0)
+    return {
+        "finding_outcome": "finalized" if findings_count > 0 else "none",
+        "runtime_completion_mode": None,
+        "finalized_findings_count": findings_count,
+        "recovered_candidates_count": 0,
+        "handoff_ready": False,
+        "recovered_candidates": [],
+    }
+
+
 async def _restore_agents_from_checkpoints(agents: List[Any]) -> List[Dict[str, Any]]:
     restored: List[Dict[str, Any]] = []
     for agent in agents:
@@ -644,6 +772,10 @@ async def _auto_generate_managed_vulnerability_reports(
     return stats
 
 
+def _disabled_managed_report_stats(findings: Optional[List[AgentFinding]] = None) -> Dict[str, int]:
+    return {'generated': 0, 'failed': 0, 'skipped': len(findings or [])}
+
+
 
 async def _execute_agent_task(task_id: str):
     """Execute an agent audit task in the background."""
@@ -921,12 +1053,22 @@ async def _execute_agent_task(task_id: str):
                 task.duration_ms = duration_ms
                 saved_findings = await _load_task_findings(db, task_id)
                 _apply_task_finding_metrics(task, saved_findings)
-                managed_report_stats = await _auto_generate_managed_vulnerability_reports(
-                    db,
-                    task=task,
-                    workflow_config=workflow_config,
-                    findings=saved_findings,
+                runtime_agent_config = dict(task.agent_config or {})
+                runtime_agent_config["finding_runtime_result"] = _build_finding_runtime_result_snapshot(
+                    persisted_findings_count=len(saved_findings),
+                    finding_payload=_extract_finding_runtime_payload(result.data),
+                    handoff=getattr(result, "handoff", None),
                 )
+                task.agent_config = runtime_agent_config
+                if AUTO_MANAGED_REPORT_POSTPROCESSING_ENABLED:
+                    managed_report_stats = await _auto_generate_managed_vulnerability_reports(
+                        db,
+                        task=task,
+                        workflow_config=workflow_config,
+                        findings=saved_findings,
+                    )
+                else:
+                    managed_report_stats = _disabled_managed_report_stats(saved_findings)
                 project_ref = await db.get(Project, task.project_id)
                 if project_ref:
                     from app.services.task_report_service import generate_task_report
@@ -1414,7 +1556,13 @@ async def _save_findings(
         return 0
 
     existing_result = await db.execute(select(AgentFinding).where(AgentFinding.task_id == task_id))
-    existing_findings = list(existing_result.scalars().all())
+    existing_scalars = existing_result.scalars()
+    if inspect.isawaitable(existing_scalars):
+        existing_scalars = await existing_scalars
+    existing_findings_result = existing_scalars.all()
+    if inspect.isawaitable(existing_findings_result):
+        existing_findings_result = await existing_findings_result
+    existing_findings = list(existing_findings_result or [])
     existing_by_fingerprint: Dict[str, AgentFinding] = {}
     for existing in existing_findings:
         existing_by_fingerprint[_build_finding_fingerprint(existing)] = existing
@@ -1490,6 +1638,12 @@ async def _save_findings(
         if not isinstance(finding, dict):
             logger.debug(f"[SaveFindings] Skipping non-dict finding: {type(finding)}")
             continue
+        if is_placeholder_finding(finding):
+            logger.warning(
+                "[SaveFindings] Skipping placeholder or free-form finding payload: %s",
+                sorted(finding.keys()),
+            )
+            continue
 
         try:
             raw_severity = str(finding.get("severity") or finding.get("risk") or "medium").lower().strip()
@@ -1556,10 +1710,10 @@ async def _save_findings(
             verdict = str(finding.get("verdict") or finding.get("report_status") or "candidate").lower()
             is_verified = bool(finding.get("is_verified", False) or verdict == "confirmed")
             poc_data = finding.get("poc") or {}
-            has_poc = bool(poc_data)
-            poc_code = poc_data.get("code") if isinstance(poc_data, dict) else None
-            poc_description = poc_data.get("description") if isinstance(poc_data, dict) else None
-            poc_steps = poc_data.get("steps") if isinstance(poc_data, dict) else None
+            has_poc = has_meaningful_poc(poc_data)
+            poc_code = poc_data.get("code") if has_poc and isinstance(poc_data, dict) else None
+            poc_description = poc_data.get("description") if has_poc and isinstance(poc_data, dict) else None
+            poc_steps = poc_data.get("steps") if has_poc and isinstance(poc_data, dict) else None
 
             verification_method = finding.get("verification_method")
             verification_result = finding.get("verification_result") or {"verdict": verdict}
@@ -1731,6 +1885,7 @@ def _normalize_debug_event(event: Any) -> Dict[str, Any]:
         "tool_input": _debug_event_value(event, "tool_input"),
         "tool_output": _debug_event_value(event, "tool_output"),
         "tool_duration_ms": _debug_event_value(event, "tool_duration_ms"),
+        "progress_percent": _event_progress_percent(event),
         "timestamp": timestamp,
         "created_at": timestamp,
         "agent_name": metadata.get("agent_name"),
@@ -1741,6 +1896,32 @@ def _normalize_debug_event(event: Any) -> Dict[str, Any]:
         "payload": payload if payload is not None else metadata,
         "metadata": metadata,
     }
+
+
+def _event_progress_percent(event: Any) -> Optional[float]:
+    direct_value = _debug_event_value(event, "progress_percent")
+    if direct_value is not None:
+        try:
+            return float(direct_value)
+        except (TypeError, ValueError):
+            return None
+
+    metadata = _debug_event_value(event, "event_metadata", {}) or {}
+    candidates: list[Any] = []
+    if isinstance(metadata, dict):
+        candidates.append(metadata.get("progress_percent"))
+        payload = metadata.get("payload")
+        if isinstance(payload, dict):
+            candidates.append(payload.get("progress_percent"))
+
+    for value in candidates:
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def build_debug_task_item(
@@ -1965,8 +2146,15 @@ async def list_agent_tasks(
     tasks = result.scalars().all()
     runtime_session_ids = await _load_runtime_session_ids(db, [task.id for task in tasks])
     for task in tasks:
+        runtime_result = _get_task_finding_runtime_result(task)
         setattr(task, "runtime_session_id", runtime_session_ids.get(task.id))
         setattr(task, "finding_runtime_stack", _resolve_task_runtime_stack(task.agent_config))
+        setattr(task, "finding_outcome", runtime_result["finding_outcome"])
+        setattr(task, "runtime_completion_mode", runtime_result["runtime_completion_mode"])
+        setattr(task, "finalized_findings_count", runtime_result["finalized_findings_count"])
+        setattr(task, "recovered_candidates_count", runtime_result["recovered_candidates_count"])
+        setattr(task, "handoff_ready", runtime_result["handoff_ready"])
+        setattr(task, "recovered_candidates", runtime_result["recovered_candidates"])
     return tasks
 
 
@@ -2072,6 +2260,7 @@ async def get_agent_task(
                 tokens_used += sub_stats.get("tokens_used", 0)
 
     runtime_session_ids = await _load_runtime_session_ids(db, [task.id])
+    runtime_result = _get_task_finding_runtime_result(task)
 
     response_data = {
         "id": task.id,
@@ -2107,6 +2296,12 @@ async def get_agent_task(
         "error_message": task.error_message,
         "runtime_session_id": runtime_session_ids.get(task.id),
         "finding_runtime_stack": _resolve_task_runtime_stack(task.agent_config),
+        "finding_outcome": runtime_result["finding_outcome"],
+        "runtime_completion_mode": runtime_result["runtime_completion_mode"],
+        "finalized_findings_count": runtime_result["finalized_findings_count"],
+        "recovered_candidates_count": runtime_result["recovered_candidates_count"],
+        "handoff_ready": runtime_result["handoff_ready"],
+        "recovered_candidates": runtime_result["recovered_candidates"],
         "audit_scope": task.audit_scope,
         "target_vulnerabilities": task.target_vulnerabilities,
         "verification_level": task.verification_level,
@@ -2270,7 +2465,7 @@ async def stream_agent_events(
                         "message": event.message,
                         "sequence": event.sequence,
                         "timestamp": event.created_at.isoformat() if event.created_at else None,
-                        "progress_percent": event.progress_percent,
+                        "progress_percent": _event_progress_percent(event),
                         "tool_name": event.tool_name,
                     }
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
@@ -2381,7 +2576,7 @@ async def stream_agent_with_thinking(
                             "message": event.message,
                             "sequence": event.sequence,
                             "timestamp": event.created_at.isoformat() if event.created_at else None,
-                            "progress_percent": event.progress_percent,
+                            "progress_percent": _event_progress_percent(event),
                             "tool_name": event.tool_name,
                         }
                         yield format_sse_event(payload)

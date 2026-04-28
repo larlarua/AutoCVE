@@ -23,6 +23,8 @@ class RuntimeMessageRole(StrEnum):
 
 class RuntimeContinueReason(StrEnum):
     NEXT_TURN = "next_turn"
+    TERMINAL_ACTION_NUDGE = "terminal_action_nudge"
+    LEGACY_TOOL_SYNTAX_NUDGE = "legacy_tool_syntax_nudge"
     MAX_OUTPUT_TOKENS_ESCALATE = "max_output_tokens_escalate"
     MAX_OUTPUT_TOKENS_RECOVERY = "max_output_tokens_recovery"
     REACTIVE_COMPACT_RETRY = "reactive_compact_retry"
@@ -42,6 +44,20 @@ class RuntimeStopReason(StrEnum):
     STOP_HOOK_PREVENTED = "stop_hook_prevented"
     HOOK_STOPPED = "hook_stopped"
     MAX_TURNS = "max_turns"
+
+
+class RuntimeTerminalAction(StrEnum):
+    FINALIZE_FINDING = "finalize_finding"
+    NATURAL_END_WITHOUT_TERMINAL_ACTION = "natural_end_without_terminal_action"
+    HOOK_STOP = "hook_stop"
+    MAX_TURNS = "max_turns"
+
+
+class RuntimeCompletionMode(StrEnum):
+    FINALIZE_TOOL = "finalize_tool"
+    LEGACY_FINAL_JSON = "legacy_final_json"
+    FALLBACK_RECOVERED = "fallback_recovered"
+    INCOMPLETE = "incomplete"
 
 
 @dataclass(slots=True)
@@ -89,6 +105,8 @@ class RuntimeModelResponse:
     recoverable_error_kind: str | None = None
     recoverable_error_message: str | None = None
     usage: dict[str, Any] = field(default_factory=dict)
+    native_tool_call_count: int = 0
+    has_terminal_tool_call: bool = False
 
 
 @dataclass(slots=True)
@@ -142,3 +160,6 @@ class TurnExecutionResult:
     tool_call_ids: list[str] = field(default_factory=list)
     tool_result_message_ids: list[str] = field(default_factory=list)
     transition: RuntimeContinueReason | None = None
+    terminal_action: RuntimeTerminalAction | None = None
+    completion_mode: RuntimeCompletionMode | None = None
+    final_payload: dict[str, Any] | None = None

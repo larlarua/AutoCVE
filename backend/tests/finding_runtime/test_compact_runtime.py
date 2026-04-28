@@ -109,10 +109,10 @@ def test_compact_conversation_uses_model_driven_summary_request_prompt():
         )
     )
 
-    assert client.calls[0]["system_prompt"] == "You are a helpful AI assistant tasked with summarizing conversations."
+    assert client.calls[0]["system_prompt"] == "你是一个负责总结对话的 AI 助手。请使用简体中文总结。"
     assert client.calls[0]["tool_definitions"] == []
     assert client.calls[0]["transcript"][-1].name == "compact_summary_request"
-    assert "Do NOT call any tools" in client.calls[0]["transcript"][-1].content
+    assert "禁止调用任何工具" in client.calls[0]["transcript"][-1].content
     assert "Focus on tests." in client.calls[0]["transcript"][-1].content
     assert "Compacted summary" in result.summary_messages[0].content
 
@@ -167,8 +167,8 @@ def test_partial_compact_conversation_from_preserves_prefix_and_anchors_boundary
     assert result.boundary_marker.metadata["preserved_segment"]["anchor_name"] == "reactive_compact_boundary"
     assert result.summary_messages[0].metadata["summarize_metadata"]["direction"] == "from"
     prompt_text = client.calls[0]["transcript"][-1].content
-    assert "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools." in prompt_text
-    assert "Do not call any tools. Return only plain text" in prompt_text
+    assert "关键要求：只能用文本回复，禁止调用任何工具。" in prompt_text
+    assert "不要调用任何工具。只返回纯文本" in prompt_text
 
 
 

@@ -351,7 +351,7 @@ class TestLegacyInteractionAgentTools:
         assert enter_state["entered_by"] == recon_agent_with_interactions.agent_id
         assert enter_state["reason"] == "Need user approval before mutation"
         assert enter_permission_mode == "plan"
-        assert "Plan mode disabled" in result
+        assert "计划模式已关闭" in result
         assert exit_state["active"] is False
         assert exit_state["last_exit_reason"] == "Approval captured"
         assert exit_permission_mode == "default"

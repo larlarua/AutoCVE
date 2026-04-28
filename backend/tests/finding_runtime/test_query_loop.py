@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
+import json
 
 from pydantic import BaseModel
 from sqlalchemy import create_engine
@@ -9,9 +10,11 @@ from sqlalchemy.orm import sessionmaker
 from app.db.base import Base
 from app.models.audit_session import AuditSkillInvocationStatus, AuditToolCallStatus
 from app.services.finding_runtime.models import (
+    RuntimeCompletionMode,
     RuntimeContinueReason,
     RuntimeMessageRole,
     RuntimeStopReason,
+    RuntimeTerminalAction,
     ToolExecutionPayload,
     TranscriptItem,
 )
@@ -21,6 +24,7 @@ from app.services.finding_runtime.query_state import QueryLoopState
 from app.services.finding_runtime.runner import FindingRuntimeRunner
 from app.services.finding_runtime.session_store import AuditSessionStore
 from app.services.finding_runtime.skills import RuntimeSkillTool
+from app.services.finding_runtime.tools.finalize_finding import FinalizeFindingTool
 from app.services.finding_runtime.tooling import RuntimeTool, ToolExecutionContext, ToolOrchestrator, ToolRegistry
 
 
@@ -112,6 +116,59 @@ def build_store() -> AuditSessionStore:
 
 def _messages_without_system(snapshot):
     return [message for message in snapshot.messages if message.role != RuntimeMessageRole.SYSTEM.value]
+
+
+def _valid_finalize_input() -> dict:
+    return {
+        "findings": [
+            {
+                "vulnerability_type": "ssrf",
+                "severity": "high",
+                "title": "SSRF in webhook fetcher",
+                "description": "The webhook fetcher accepts a user-controlled URL and fetches it without an SSRF allowlist.",
+                "file_path": "pkg/modules/webhook/webhook.go",
+                "line_start": 99,
+                "line_end": 131,
+                "code_snippet": "target := r.Header.Get(\"Gotenberg-Webhook-Url\")",
+                "source": "HTTP header Gotenberg-Webhook-Url",
+                "sink": "retryablehttp client request to the supplied webhook URL",
+                "suggestion": "Validate webhook URLs with a strict allowlist and block loopback/link-local/private ranges.",
+                "confidence": 0.95,
+                "needs_verification": True,
+                "verdict": "candidate",
+                "exploit_chain": [
+                    {
+                        "step": 1,
+                        "location": "pkg/modules/webhook/webhook.go:99-131",
+                        "description": "User-controlled webhook URL is accepted from the request header.",
+                        "data_state": "The URL remains attacker controlled.",
+                        "bypass_reason": "No SSRF allowlist is applied before the outbound request.",
+                    }
+                ],
+                "poc": {
+                    "description": "Submit a webhook URL pointing at a loopback service and observe the server initiating the request.",
+                    "preconditions": ["Webhook feature is enabled."],
+                    "steps": [
+                        {
+                            "step": 1,
+                            "action": "Send a conversion request with Gotenberg-Webhook-Url set to http://127.0.0.1:8080/admin.",
+                            "request": "POST /forms/chromium/convert/url",
+                            "expected_response": "The server attempts to contact the supplied internal URL.",
+                        }
+                    ],
+                    "payload": "Gotenberg-Webhook-Url: http://127.0.0.1:8080/admin",
+                    "impact": "An authenticated attacker can pivot the server into internal HTTP services.",
+                    "cve_justification": "The issue exposes SSRF reachability through a network-facing endpoint.",
+                },
+                "impact": "An attacker can reach internal network services from the server.",
+                "cve_justification": "Network-reachable SSRF with internal service impact is CVE-relevant.",
+                "verification_notes": "Source, sink, and propagation path were verified in code.",
+            }
+        ],
+        "summary": "Completed audit with one structured SSRF candidate.",
+        "completion_note": "Evidence chain is closed.",
+        "needs_handoff": True,
+    }
 
 
 def test_query_loop_run_turn_persists_assistant_reply_and_turn():
@@ -280,7 +337,7 @@ def test_query_loop_defaults_stop_reason_when_model_omits_it():
     assert result.transition is None
 
 
-def test_query_loop_executes_textual_tool_call_fallback():
+def test_query_loop_rejects_textual_tool_call_fallback_and_requests_native_tool_call():
     store = build_store()
     session_id = store.create_session(project_id="project-1", system_prompt="system")
     store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="inspect code"))
@@ -291,14 +348,145 @@ def test_query_loop_executes_textual_tool_call_fallback():
                 "stop_reason": RuntimeStopReason.COMPLETED.value,
                 "tool_calls": [],
             },
-            {
-                "content": "Final answer",
-                "stop_reason": RuntimeStopReason.COMPLETED.value,
-                "tool_calls": [],
-            },
         ]
     )
     registry = ToolRegistry([EchoTool()])
+    orchestrator = ToolOrchestrator(session_store=store, tool_registry=registry)
+    loop = QueryLoop(session_store=store, model_client=client, tool_registry=registry, tool_orchestrator=orchestrator)
+
+    result = asyncio.run(loop.run_turn(session_id=session_id, model_name="gpt-test"))
+    state = store.load_query_loop_state(session_id)
+    snapshot = store.load_session_snapshot(session_id)
+
+    assert result.stop_reason is None
+    assert result.transition is RuntimeContinueReason.LEGACY_TOOL_SYNTAX_NUDGE
+    assert len(snapshot.tool_calls) == 0
+    visible_messages = _messages_without_system(snapshot)
+    assert [message.role for message in visible_messages] == [
+        RuntimeMessageRole.USER.value,
+        RuntimeMessageRole.ASSISTANT.value,
+    ]
+    assert state.messages[-1].name == "legacy_tool_syntax_nudge"
+    assert state.messages[-1].content
+    assert state.tool_use_context["legacy_text_tool_call_nudge_count"] == 1
+    assert snapshot.checkpoints[-1].state_payload["transition"] == RuntimeContinueReason.LEGACY_TOOL_SYNTAX_NUDGE.value
+
+
+def test_runner_finalize_finding_tool_marks_terminal_completion():
+    store = build_store()
+    session_id = store.create_session(project_id="project-1", system_prompt="system")
+    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="inspect code"))
+    client = FakeModelClient(
+        responses=[
+            {
+                "content": "Ready to submit final findings",
+                "tool_calls": [
+                    {
+                        "id": "tool-1",
+                        "name": "FinalizeFinding",
+                        "input": _valid_finalize_input(),
+                    }
+                ],
+            }
+        ]
+    )
+    registry = ToolRegistry([FinalizeFindingTool()])
+    orchestrator = ToolOrchestrator(session_store=store, tool_registry=registry)
+    runner = FindingRuntimeRunner(
+        session_store=store,
+        model_client=client,
+        tool_registry=registry,
+        tool_orchestrator=orchestrator,
+    )
+
+    result = asyncio.run(runner.run_once(session_id=session_id, model_name="gpt-test"))
+
+    assert result.stop_reason is RuntimeStopReason.COMPLETED
+    assert result.terminal_action is RuntimeTerminalAction.FINALIZE_FINDING
+    assert result.completion_mode is RuntimeCompletionMode.FINALIZE_TOOL
+    assert result.final_payload == _valid_finalize_input()
+
+
+def test_runner_rejects_reason_only_finalize_finding_payload_without_terminal_completion():
+    store = build_store()
+    session_id = store.create_session(project_id="project-1", system_prompt="system")
+    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="inspect code"))
+    client = FakeModelClient(
+        responses=[
+            {
+                "content": "Submit final result",
+                "tool_calls": [
+                    {
+                        "id": "tool-1",
+                        "name": "FinalizeFinding",
+                        "input": {
+                            "findings": [
+                                {
+                                    "reason": "SSRF vulnerability with the exploit chain and PoC hidden in free-form prose.",
+                                }
+                            ],
+                            "summary": "Found SSRF.",
+                        },
+                    }
+                ],
+            },
+            {
+                "content": "Continue collecting structured evidence",
+                "stop_reason": RuntimeStopReason.COMPLETED.value,
+            },
+        ]
+    )
+    registry = ToolRegistry([FinalizeFindingTool()])
+    orchestrator = ToolOrchestrator(session_store=store, tool_registry=registry)
+    runner = FindingRuntimeRunner(
+        session_store=store,
+        model_client=client,
+        tool_registry=registry,
+        tool_orchestrator=orchestrator,
+    )
+
+    result = asyncio.run(runner.run_once(session_id=session_id, model_name="gpt-test"))
+    snapshot = store.load_session_snapshot(session_id)
+
+    assert result.terminal_action is None
+    assert result.completion_mode is None
+    assert len(client.calls) == 2
+    assert snapshot.tool_calls[0].status == AuditToolCallStatus.COMPLETED.value
+    assert snapshot.tool_calls[0].output_payload["finalization_rejected"] is True
+    assert "reason" in snapshot.tool_calls[0].output_payload["validation_errors"][0]["message"]
+
+
+def test_runner_invalid_finalize_finding_continues_with_tool_error_feedback():
+    store = build_store()
+    session_id = store.create_session(project_id="project-1", system_prompt="system")
+    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="继续审查"))
+    client = FakeModelClient(
+        responses=[
+            {
+                "content": "Ready to submit final result",
+                "tool_calls": [
+                    {
+                        "id": "tool-1",
+                        "name": "FinalizeFinding",
+                        "input": {
+                            "findings": [
+                                {
+                                    "title": "SSRF in webhook fetcher",
+                                    "severity": "high",
+                                    "vulnerability_type": "ssrf",
+                                }
+                            ]
+                        },
+                    }
+                ],
+            },
+            {
+                "content": "Final natural language reply",
+                "stop_reason": RuntimeStopReason.COMPLETED.value,
+            },
+        ]
+    )
+    registry = ToolRegistry([FinalizeFindingTool()])
     orchestrator = ToolOrchestrator(session_store=store, tool_registry=registry)
     runner = FindingRuntimeRunner(
         session_store=store,
@@ -311,14 +499,182 @@ def test_query_loop_executes_textual_tool_call_fallback():
     snapshot = store.load_session_snapshot(session_id)
 
     assert result.stop_reason is RuntimeStopReason.COMPLETED
-    visible_messages = _messages_without_system(snapshot)
-    assert visible_messages[2].role == RuntimeMessageRole.TOOL_USE.value
-    assert visible_messages[2].payload["tool_name"] == "echo"
-    assert visible_messages[3].payload["output"] == {"echo": "repo summary"}
-    assert any(
-        checkpoint.state_payload.get("transition") == RuntimeContinueReason.NEXT_TURN.value
+    assert result.terminal_action is None
+    assert result.completion_mode is None
+    assert len(client.calls) == 2
+    assert snapshot.tool_calls[0].status == AuditToolCallStatus.COMPLETED.value
+    assert snapshot.tool_calls[0].output_payload["finalization_rejected"] is True
+    assert snapshot.messages[-2].role == RuntimeMessageRole.TOOL_RESULT.value
+    assert snapshot.messages[-2].message_metadata["is_error"] is False
+    transition_checkpoints = [
+        checkpoint.state_payload
         for checkpoint in snapshot.checkpoints
+        if checkpoint.state_payload.get("transition") is not None or "transition" in checkpoint.state_payload
+    ]
+    assert transition_checkpoints[0]["transition"] == RuntimeContinueReason.NEXT_TURN.value
+
+
+def test_query_loop_marks_natural_end_without_terminal_action():
+    store = build_store()
+    session_id = store.create_session(project_id="project-1", system_prompt="system prompt")
+    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="continue audit"))
+    state = store.load_query_loop_state(session_id)
+    state.tool_use_context["missing_terminal_action_nudge_count"] = 1
+    store.save_query_loop_state(session_id, state)
+    loop = QueryLoop(
+        session_store=store,
+        model_client=FakeModelClient(responses=[{"content": "让我继续审查媒体上传和内部 API。"}]),
+        tool_registry=ToolRegistry([EchoTool()]),
+        tool_orchestrator=None,
     )
+
+    result = asyncio.run(loop.run_turn(session_id=session_id, model_name="gpt-test"))
+
+    assert result.stop_reason is RuntimeStopReason.COMPLETED
+    assert result.terminal_action is RuntimeTerminalAction.NATURAL_END_WITHOUT_TERMINAL_ACTION
+    assert result.completion_mode is RuntimeCompletionMode.INCOMPLETE
+    assert result.final_payload is None
+
+
+def test_query_loop_injects_terminal_action_nudge_once_for_continue_intent():
+    store = build_store()
+    session_id = store.create_session(project_id="project-1", system_prompt="system prompt")
+    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="继续审查"))
+    loop = QueryLoop(
+        session_store=store,
+        model_client=FakeModelClient(responses=[{"content": "让我继续审查状态创建、媒体上传和内部 API。"}]),
+        tool_registry=ToolRegistry([EchoTool()]),
+        tool_orchestrator=None,
+    )
+
+    result = asyncio.run(loop.run_turn(session_id=session_id, model_name="gpt-test"))
+    state = store.load_query_loop_state(session_id)
+    snapshot = store.load_session_snapshot(session_id)
+
+    assert result.stop_reason is None
+    assert result.transition is RuntimeContinueReason.TERMINAL_ACTION_NUDGE
+    assert state.messages[-1].name == "terminal_action_nudge"
+    assert state.messages[-1].content
+    assert state.tool_use_context["missing_terminal_action_nudge_count"] == 1
+    assert snapshot.checkpoints[-1].state_payload["transition"] == RuntimeContinueReason.TERMINAL_ACTION_NUDGE.value
+
+
+def test_runner_marks_incomplete_natural_end_as_failed_session_state():
+    store = build_store()
+    session_id = store.create_session(project_id="project-1", system_prompt="system prompt")
+    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="继续审查"))
+    state = store.load_query_loop_state(session_id)
+    state.tool_use_context["missing_terminal_action_nudge_count"] = 1
+    store.save_query_loop_state(session_id, state)
+    runner = FindingRuntimeRunner(
+        session_store=store,
+        model_client=FakeModelClient(responses=[{"content": "让我继续审查媒体上传和内部 API。"}]),
+        tool_registry=ToolRegistry([EchoTool()]),
+        tool_orchestrator=None,
+    )
+
+    result = asyncio.run(runner.run_once(session_id=session_id, model_name="gpt-test"))
+    snapshot = store.load_session_snapshot(session_id)
+
+    assert result.stop_reason is RuntimeStopReason.COMPLETED
+    assert result.terminal_action is RuntimeTerminalAction.NATURAL_END_WITHOUT_TERMINAL_ACTION
+    assert result.completion_mode is RuntimeCompletionMode.INCOMPLETE
+    assert snapshot.session.state == "failed"
+
+
+def test_query_loop_requires_terminal_action_and_nudges_plain_summary_without_tool_call():
+    store = build_store()
+    session_id = store.create_session(project_id="project-1", system_prompt="system prompt")
+    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="audit code"))
+    loop = QueryLoop(
+        session_store=store,
+        model_client=FakeModelClient(
+            responses=[
+                {
+                    "content": "Key finding: convertUrlRoute may have SSRF. I need to inspect tasks.go request blocking logic.",
+                    "stop_reason": RuntimeStopReason.COMPLETED.value,
+                }
+            ]
+        ),
+        tool_registry=ToolRegistry([EchoTool()]),
+        tool_orchestrator=None,
+        require_terminal_action=True,
+    )
+
+    result = asyncio.run(loop.run_turn(session_id=session_id, model_name="gpt-test"))
+    state = store.load_query_loop_state(session_id)
+    snapshot = store.load_session_snapshot(session_id)
+
+    assert result.stop_reason is None
+    assert result.transition is RuntimeContinueReason.TERMINAL_ACTION_NUDGE
+    assert result.completion_mode is None
+    assert state.messages[-1].name == "terminal_action_nudge"
+    assert state.messages[-1].content
+    assert state.tool_use_context["missing_terminal_action_nudge_count"] == 1
+    assert snapshot.turns[-1].status == "terminal_action_nudge"
+
+
+def test_runner_marks_required_terminal_action_exhaustion_as_failed_session_state():
+    store = build_store()
+    session_id = store.create_session(project_id="project-1", system_prompt="system prompt")
+    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="audit code"))
+    state = store.load_query_loop_state(session_id)
+    state.tool_use_context["missing_terminal_action_nudge_count"] = 2
+    store.save_query_loop_state(session_id, state)
+    runner = FindingRuntimeRunner(
+        session_store=store,
+        model_client=FakeModelClient(
+            responses=[
+                {
+                    "content": "Key finding: convertUrlRoute may have SSRF. I need to inspect tasks.go request blocking logic.",
+                    "stop_reason": RuntimeStopReason.COMPLETED.value,
+                }
+            ]
+        ),
+        tool_registry=ToolRegistry([EchoTool()]),
+        tool_orchestrator=None,
+        require_terminal_action=True,
+        terminal_action_nudge_limit=2,
+    )
+
+    result = asyncio.run(runner.run_once(session_id=session_id, model_name="gpt-test"))
+    snapshot = store.load_session_snapshot(session_id)
+
+    assert result.stop_reason is RuntimeStopReason.COMPLETED
+    assert result.terminal_action is RuntimeTerminalAction.NATURAL_END_WITHOUT_TERMINAL_ACTION
+    assert result.completion_mode is RuntimeCompletionMode.INCOMPLETE
+    assert snapshot.session.state == "failed"
+
+
+def test_query_loop_resets_terminal_action_nudge_count_after_tool_call():
+    store = build_store()
+    session_id = store.create_session(project_id="project-1", system_prompt="system prompt")
+    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="audit code"))
+    state = store.load_query_loop_state(session_id)
+    state.tool_use_context["missing_terminal_action_nudge_count"] = 2
+    store.save_query_loop_state(session_id, state)
+    loop = QueryLoop(
+        session_store=store,
+        model_client=FakeModelClient(
+            responses=[
+                {
+                    "content": "I will inspect the next file.",
+                    "tool_calls": [{"id": "tool-1", "name": "echo", "input": {"text": "continue"}}],
+                    "stop_reason": RuntimeStopReason.COMPLETED.value,
+                }
+            ]
+        ),
+        tool_registry=ToolRegistry([EchoTool()]),
+        tool_orchestrator=ToolOrchestrator(session_store=store, tool_registry=ToolRegistry([EchoTool()])),
+        require_terminal_action=True,
+        terminal_action_nudge_limit=2,
+    )
+
+    result = asyncio.run(loop.run_turn(session_id=session_id, model_name="gpt-test"))
+    next_state = store.load_query_loop_state(session_id)
+
+    assert result.transition is RuntimeContinueReason.NEXT_TURN
+    assert "missing_terminal_action_nudge_count" not in next_state.tool_use_context
 
 
 def test_query_loop_ignores_textual_tool_calls_without_orchestrator_when_no_tools_are_exposed():
@@ -348,6 +704,46 @@ def test_query_loop_ignores_textual_tool_calls_without_orchestrator_when_no_tool
     ]
     assert snapshot.checkpoints[-1].state_payload["tool_call_ids"] == []
     assert snapshot.checkpoints[-1].state_payload["transition"] is None
+
+
+def test_extract_text_tool_calls_preserves_nested_write_payload():
+    nested_content = json.dumps(
+        {
+            "findings": [
+                {
+                    "title": "Server-side request forgery in fetcher",
+                    "references": ["CWE-918", "https://example.test/advisory"],
+                }
+            ],
+            "summary": "in progress",
+        },
+        ensure_ascii=False,
+    )
+    tool_payload = {
+        "tool_use_id": "call_123",
+        "tool_name": "Write",
+        "input": {
+            "path": ".auditai/findings.json",
+            "content": nested_content,
+        },
+    }
+
+    parsed = QueryLoop._extract_text_tool_calls(
+        "Tool Call: Write\n"
+        + json.dumps(tool_payload, ensure_ascii=False)
+        + "\nObservation: [done]"
+    )
+
+    assert parsed == [
+        {
+            "id": "text-tool-call-1",
+            "name": "Write",
+            "input": {
+                "path": ".auditai/findings.json",
+                "content": nested_content,
+            },
+        }
+    ]
 
 def test_query_loop_runs_pre_model_pipeline_in_restored_order(monkeypatch):
     store = build_store()
