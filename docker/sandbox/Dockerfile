@@ -2,18 +2,21 @@
 # 安全沙箱环境用于漏洞验证和 PoC 执行
 # 集成各类安全扫描工具 (Semgrep, Bandit, Gitleaks, etc.)
 
-FROM docker.m.daocloud.io/python:3.11-bullseye
+FROM docker.m.daocloud.io/python:3.11-bookworm
+
+ARG SEMGREP_VERSION=1.161.0
 
 LABEL maintainer="XCodeReviewer Team"
 LABEL description="Secure sandbox environment for vulnerability verification and security scanning"
 
 # 安装基本工具
 # 安装基本工具
-# 使用阿里云镜像加速 apt
+# 使用默认 Debian 源并开启 apt 重试，避免绑定单个不稳定镜像站
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
-    sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list && \
-    sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list && \
-    apt-get update && apt-get install -y --no-install-recommends \
+    echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/99-retries && \
+    echo 'Acquire::http::Timeout "30";' >> /etc/apt/apt.conf.d/99-retries && \
+    echo 'Acquire::https::Timeout "30";' >> /etc/apt/apt.conf.d/99-retries && \
+    apt-get update && apt-get install -y --fix-missing --no-install-recommends \
     curl \
     wget \
     netcat-openbsd \
@@ -24,8 +27,10 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
     unzip \
     jq \
     php-cli \
-    openjdk-11-jdk-headless \
+    openjdk-17-jdk-headless \
     ruby-full \
+    rustc \
+    cargo \
     build-essential \
     cmake \
     clang \
@@ -33,12 +38,18 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
     && rm -rf /var/lib/apt/lists/*
 
 # 安装 Node.js (用于 JavaScript/TypeScript 代码执行 和 npm audit)
-# 使用淘宝/阿里云镜像加速
+# 使用 Node.js binary tarball，优先国内镜像并回退官方源
+ARG NODE_VERSION=20.20.2
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
-    && npm config set registry https://registry.npmmirror.com \
-    && rm -rf /var/lib/apt/lists/*
+    for base_url in "https://npmmirror.com/mirrors/node" "https://nodejs.org/dist"; do \
+      curl -fsSL --retry 5 --retry-delay 3 --connect-timeout 30 "${base_url}/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz && break; \
+    done && \
+    test -s /tmp/node.tar.xz && \
+    tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 && \
+    rm /tmp/node.tar.xz && \
+    node --version && \
+    npm --version && \
+    npm config set registry https://registry.npmmirror.com
 
 # 安装 Go (使用阿里云镜像)
 ENV PATH=$PATH:/usr/local/go/bin
@@ -48,15 +59,8 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
     tar -C /usr/local -xzf go.tar.gz && \
     rm go.tar.gz
 
-# 安装 Rust (使用 rsproxy 镜像)
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    RUSTUP_DIST_SERVER=https://rsproxy.cn \
-    RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
-RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
-    curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y --default-toolchain stable --profile minimal && \
-    chmod -R a+w /usr/local/cargo
+# Verify distro-provided Rust tools instead of relying on an external rustup installer.
+RUN rustc --version && cargo --version
 
 # 安装 Python 安全工具
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
@@ -71,9 +75,11 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
     pyjwt \
     python-jose \
     sqlparse \
-    semgrep \
+    "semgrep==${SEMGREP_VERSION}" \
     bandit \
-    safety
+    safety && \
+    semgrep --version && \
+    test "$(semgrep --version)" = "${SEMGREP_VERSION}"
 
 # 安装 Gitleaks
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \

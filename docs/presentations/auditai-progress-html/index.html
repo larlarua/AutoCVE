@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AuditAI 项目进展汇报</title>
+<link rel="stylesheet" href="./assets/fonts.css">
+<link rel="stylesheet" href="./assets/base.css">
+<link rel="stylesheet" href="./style.css">
+</head>
+<body class="auditai-progress-deck">
+<div class="deck">
+
+  <section class="slide is-active cover-slide" data-title="整体架构">
+    <div class="bg-grid"></div>
+    <div class="cover-topline">
+      <span>AuditAI Project Review</span>
+      <span>2026-04-21</span>
+    </div>
+    <div class="hero-stack">
+      <p class="kicker">Leader Briefing</p>
+      <h1 class="cover-title">AuditAI 项目进展汇报</h1>
+      <p class="cover-subtitle">固定阶段编排 + Finding Runtime ReAct 循环 + 工具 / Skill / 记忆底座，正在形成一套可追踪、可追问、可验证的源码审计平台。</p>
+    </div>
+
+    <div class="architecture-board">
+      <div class="layer layer-ui">
+        <div class="layer-label">前台工作台</div>
+        <div class="layer-body">
+          <div class="arch-card">
+            <strong>Audit Session 页面</strong>
+            <span>时间线、Findings 侧栏、工具轨迹、Skill 轨迹、Memory 轨迹、Handoff 面板</span>
+          </div>
+          <div class="arch-card">
+            <strong>人工追问入口</strong>
+            <span>Finding 产出后，可在同一会话里继续追问利用链、修复方案、证据来源</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="layer layer-api">
+        <div class="layer-label">后端 API 与会话层</div>
+        <div class="layer-body">
+          <div class="arch-card">
+            <strong>Audit Session API</strong>
+            <span>消息流式返回、会话消息持久化、工具调用/记忆/技能/交接全量留痕</span>
+          </div>
+          <div class="arch-card">
+            <strong>Runtime State</strong>
+            <span>记录 permission mode、已触达路径、skill 合约、discovery 快照与 guardrails 状态</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="layer layer-engine">
+        <div class="layer-label">审计引擎</div>
+        <div class="layer-body engine-grid">
+          <div class="arch-card accent">
+            <strong>Orchestrator</strong>
+            <span>按固定阶段调度 Recon / Scan / Triage / Finding / Verification</span>
+          </div>
+          <div class="arch-card accent">
+            <strong>Finding Runtime</strong>
+            <span>ReAct 状态机、上下文压缩、技能渐进披露、工具编排与停止钩子</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="layer layer-foundation">
+        <div class="layer-label">基础底座</div>
+        <div class="layer-body foundation-grid">
+          <div class="arch-card mini">
+            <strong>Tool Registry</strong>
+            <span>统一包装读写、Shell、Skill、AskUser、Todo、PlanMode</span>
+          </div>
+          <div class="arch-card mini">
+            <strong>Skill Runtime</strong>
+            <span>发现、评分、分阶段加载、allowed_tools 约束</span>
+          </div>
+          <div class="arch-card mini">
+            <strong>Memory Runtime</strong>
+            <span>规则、项目记忆、skill references 与召回内容注入系统提示</span>
+          </div>
+          <div class="arch-card mini">
+            <strong>Persistence</strong>
+            <span>会话消息、工具调用、skills、memories、handoffs、checkpoints</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="slide-footer">
+      <span>整体看法：AuditAI 已不是单点模型，而是一套“会审计、会记账、可回放”的运行平台</span>
+      <span>01 / 10</span>
+    </div>
+  </section>
+
+  <section class="slide" data-title="项目流程">
+    <div class="bg-grid"></div>
+    <div class="section-head">
+      <p class="kicker">Workflow</p>
+      <h2 class="h2">AuditAI 项目流程图</h2>
+      <p class="lede">源码里已经把主要流程固化为固定阶段，而不是把大方向完全交给模型自由发挥。</p>
+    </div>
+
+    <div class="flow-stage-board">
+      <div class="flow-row primary">
+        <div class="flow-node">Orchestrator<span>调度核心</span></div>
+        <div class="flow-arrow"></div>
+        <div class="flow-node">Recon<span>项目画像 / 风险入口</span></div>
+        <div class="flow-arrow split-up"></div>
+        <div class="flow-node">Scan<span>工具扫描</span></div>
+        <div class="flow-arrow"></div>
+        <div class="flow-node">Triage<span>过滤与归并</span></div>
+        <div class="flow-arrow curve-right"></div>
+        <div class="flow-node">Verification<span>最终验证</span></div>
+      </div>
+
+      <div class="flow-row secondary">
+        <div class="flow-node focus">Finding<span>深度挖掘 / 利用链闭环</span></div>
+        <div class="flow-arrow to-human"></div>
+        <div class="flow-node human">人工追问入口<span>同会话继续追证据、补利用链、看修复建议</span></div>
+      </div>
+    </div>
+
+    <div class="tri-columns">
+      <div class="mini-panel">
+        <h4>广覆盖</h4>
+        <p>Recon 先识别项目结构，Scan + Triage 负责把“广覆盖扫描结果”压成可研判候选。</p>
+      </div>
+      <div class="mini-panel">
+        <h4>深闭环</h4>
+        <p>Finding 不只扫规则，更强调 source 到 sink 的漏洞链、POC 线索和证据闭合。</p>
+      </div>
+      <div class="mini-panel">
+        <h4>可协作</h4>
+        <p>在 Finding 之后，前端已有 follow-up composer，可把人工问题重新送回当前审计会话。</p>
+      </div>
+    </div>
+
+    <div class="slide-footer">
+      <span>流程特点：先铺开扫描面，再把深度推理和人工追问收敛到候选漏洞上</span>
+      <span>02 / 10</span>
+    </div>
+  </section>
+
+  <section class="slide" data-title="ReAct 状态机">
+    <div class="bg-grid"></div>
+    <div class="section-head compact">
+      <p class="kicker">ReAct State Machine</p>
+      <h2 class="h2">ReAct 循环更像“状态机调度”</h2>
+      <p class="lede">源码里不仅有“思考-行动-观察”循环，还有继续、压缩恢复、收敛、停止等多类状态转移。</p>
+    </div>
+
+    <div class="react-layout">
+      <div class="react-diagram">
+        <div class="react-state state-a active">
+          <strong>1. 构造上下文</strong>
+          <span>拼接系统提示、技能路由、记忆注入与当前会话历史</span>
+        </div>
+        <div class="react-link"></div>
+        <div class="react-state state-b">
+          <strong>2. 模型决策</strong>
+          <span>产出回答、tool_use、或进入压缩 / 恢复分支</span>
+        </div>
+        <div class="react-link"></div>
+        <div class="react-state state-c">
+          <strong>3. 工具执行</strong>
+          <span>经权限判断、guardrails 与并发编排后执行工具</span>
+        </div>
+        <div class="react-link"></div>
+        <div class="react-state state-d">
+          <strong>4. 观察整合</strong>
+          <span>把工具结果、hook 产物、handoff 与记忆写回 transcript</span>
+        </div>
+        <div class="react-loop-back"></div>
+        <div class="react-state state-e final">
+          <strong>5. 收敛输出</strong>
+          <span>进入 report_finalization / final-only mode，停止新工具，返回 JSON 结论</span>
+        </div>
+      </div>
+
+      <div class="decision-panels">
+        <div class="decision-card continue">
+          <h4>常见继续条件</h4>
+          <ul>
+            <li>模型明确返回新的 <code>tool_use</code>，转入下一轮</li>
+            <li>Finding 还有 runnable candidates 或 follow-up budget</li>
+            <li>token budget 允许继续，系统发出 continuation nudge</li>
+            <li>命中 <code>max_output_tokens</code>，进入续写恢复</li>
+            <li>prompt 过长，触发 reactive compact / collapse drain 后重试</li>
+          </ul>
+        </div>
+
+        <div class="decision-card stop">
+          <h4>常见终止条件</h4>
+          <ul>
+            <li>本轮不再调用 tool_use，且没有 transition，直接 completed</li>
+            <li>进入 <code>report_finalization</code> 或 final-only mode</li>
+            <li>达到 <code>max_turns</code> 上限（可配置）</li>
+            <li>命中 stop hook、blocking limit、prompt-too-long 等硬停止</li>
+            <li>同类无进展工具模式重复 3 次，或同一工具连续报错 3 轮</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="slide-footer">
+      <span>核心价值：AuditAI 的 ReAct 不是“多转几轮”，而是“按状态与条件收敛”</span>
+      <span>03 / 10</span>
+    </div>
+  </section>
+
+  <section class="slide loop-demo-slide" data-title="ReAct 动画演示">
+    <div class="bg-grid"></div>
+    <div class="section-head compact">
+      <p class="kicker">Animated Demo</p>
+      <h2 class="h2">ReAct Loop 动画演示</h2>
+      <p class="lede">主题示例：在项目中追一条 CVE 漏洞链。但重点不是漏洞本身，而是 ReAct 如何一步步推进。</p>
+    </div>
+
+    <div class="loop-demo">
+      <div class="loop-ring">
+        <div class="ring-node node-1" data-step="1">Think<div>怀疑上传入口可被外部触发</div></div>
+        <div class="ring-node node-2" data-step="2">Act<div>Read / Grep 关键函数</div></div>
+        <div class="ring-node node-3" data-step="3">Observe<div>发现用户输入进入文件路径</div></div>
+        <div class="ring-node node-4" data-step="4">Think<div>继续找校验、sink、利用前提</div></div>
+        <div class="ring-node node-5" data-step="5">Act<div>再读调用链 / 动态验证</div></div>
+        <div class="ring-node node-6" data-step="6">Decide<div>证据不足继续；证据闭环则结束</div></div>
+        <svg class="ring-svg" viewBox="0 0 600 420" aria-hidden="true">
+          <path d="M120 210 C120 110, 240 60, 300 60 C420 60, 500 140, 500 210 C500 300, 420 360, 300 360 C200 360, 120 300, 120 210" />
+        </svg>
+      </div>
+
+      <div class="demo-console">
+        <div class="demo-chip">Theme: “定位一条 CVE 漏洞链”</div>
+        <div class="demo-log">
+          <div class="log-line" data-log="1"><span>01</span> 形成假设：入口可能在上传与解压路径</div>
+          <div class="log-line" data-log="2"><span>02</span> 调用工具：读取 controller、搜索 unzip / path join</div>
+          <div class="log-line" data-log="3"><span>03</span> 观察结果：外部输入穿过中间校验，落到危险 sink</div>
+          <div class="log-line" data-log="4"><span>04</span> 更新假设：需要补齐 guard 绕过条件与影响面</div>
+          <div class="log-line" data-log="5"><span>05</span> 再次行动：继续读调用链，必要时跑验证 harness</div>
+          <div class="log-line" data-log="6"><span>06</span> 决策：若链条闭环则 Final Answer；否则回到下一轮</div>
+        </div>
+        <div class="decision-switch">
+          <div class="switch-pill continue">证据不足：继续循环</div>
+          <div class="switch-pill stop">证据闭环：进入 Finalize</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="slide-footer">
+      <span>这一页重点：展示 AuditAI 如何围绕“假设 - 工具 - 观察 - 决策”不断逼近结论</span>
+      <span>04 / 10</span>
+    </div>
+  </section>
+
+  <section class="slide" data-title="工具系统">
+    <div class="bg-grid"></div>
+    <div class="section-head compact">
+      <p class="kicker">Tool System</p>
+      <h2 class="h2">当前工具体系与工具编排</h2>
+      <p class="lede">AuditAI 的工具系统已经不是“模型随便调脚本”，而是统一注册、双层权限判断、并发可控、全程留痕。</p>
+    </div>
+
+    <div class="tools-grid">
+      <div class="tool-group">
+        <h4>运行时通用工具</h4>
+        <div class="tool-tags">
+          <span>Read</span>
+          <span>Glob</span>
+          <span>Grep</span>
+          <span>Write</span>
+          <span>Bash</span>
+          <span>PowerShell</span>
+          <span>Skill</span>
+          <span>AskUser</span>
+          <span>TodoWrite</span>
+          <span>Enter / Exit Plan Mode</span>
+          <span>ToolSearch</span>
+        </div>
+      </div>
+
+      <div class="tool-group">
+        <h4>审计专用工具</h4>
+        <div class="tool-tags">
+          <span>semgrep_scan</span>
+          <span>bandit_scan</span>
+          <span>gitleaks_scan</span>
+          <span>npm_audit</span>
+          <span>safety_scan</span>
+          <span>osv_scan</span>
+          <span>trufflehog_scan</span>
+          <span>kunlun_scan</span>
+          <span>smart_scan</span>
+          <span>pattern_match</span>
+          <span>quick_audit</span>
+          <span>run_code / sandbox</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="orchestration-strip">
+      <div class="strip-node">Tool Registry</div>
+      <div class="strip-arrow"></div>
+      <div class="strip-node">Runtime Permission</div>
+      <div class="strip-arrow"></div>
+      <div class="strip-node">Tool Guardrails</div>
+      <div class="strip-arrow"></div>
+      <div class="strip-node">Streaming Executor</div>
+      <div class="strip-arrow"></div>
+      <div class="strip-node">Checkpoint / Hook / Trace</div>
+    </div>
+
+    <div class="tri-columns tight">
+      <div class="mini-panel">
+        <h4>统一注册</h4>
+        <p>运行时工具先收口到统一 Registry，模型看到的是标准化接口，而不是散落脚本。</p>
+      </div>
+      <div class="mini-panel">
+        <h4>并发可控</h4>
+        <p>并发安全工具可并行；Shell 失败时会取消并行兄弟调用，避免错误扩散。</p>
+      </div>
+      <div class="mini-panel">
+        <h4>双层权限</h4>
+        <p>先过 runtime permission，再过 tool 级 guardrails，写文件和 shell 都可要求显式批准。</p>
+      </div>
+    </div>
+
+    <div class="slide-footer">
+      <span>管理视角：工具系统已经具备“能调、可控、可追责”的平台属性</span>
+      <span>05 / 10</span>
+    </div>
+  </section>
+
+  <section class="slide" data-title="上下文压缩">
+    <div class="bg-grid"></div>
+    <div class="section-head compact">
+      <p class="kicker">Context Compaction</p>
+      <h2 class="h2">当前已有的上下文压缩机制</h2>
+      <p class="lede">目标不是单纯“省 token”，而是让长时审计跑得更久，同时尽量不断掉关键证据。</p>
+    </div>
+
+    <div class="compression-stack">
+      <div class="compress-card level-1">
+        <strong>1. tool_result_budget</strong>
+        <span>先截断冗长工具输出，把无关细节留在边缘</span>
+      </div>
+      <div class="compress-card level-2">
+        <strong>2. history_snip</strong>
+        <span>超过阈值后，只保留最近若干条消息，其余变成边界提示</span>
+      </div>
+      <div class="compress-card level-3">
+        <strong>3. microcompact</strong>
+        <span>对超长 tool result 就地微压缩，保留“看得懂”的前段信息</span>
+      </div>
+      <div class="compress-card level-4">
+        <strong>4. context_collapse</strong>
+        <span>把较早轮次折叠成 summary marker，关键信息改成可回忆摘要</span>
+      </div>
+      <div class="compress-card level-5">
+        <strong>5. auto_compact</strong>
+        <span>逼近上下文阈值时自动触发总结，把旧对话压成 compact summary</span>
+      </div>
+      <div class="compress-card level-6">
+        <strong>6. reactive_compact / collapse_drain</strong>
+        <span>真的溢出时，再走补救式压缩与重试；最后还有 blocking limit 兜底</span>
+      </div>
+    </div>
+
+    <div class="tri-columns tight">
+      <div class="mini-panel">
+        <h4>平时轻量化</h4>
+        <p>平时先用裁剪、snip、microcompact 这类低成本动作，不轻易动全量总结。</p>
+      </div>
+      <div class="mini-panel">
+        <h4>逼近阈值再总结</h4>
+        <p>当 token 使用逼近 auto-compact threshold，系统才做真正的 conversation summary。</p>
+      </div>
+      <div class="mini-panel">
+        <h4>异常场景可恢复</h4>
+        <p>prompt too long、媒体过大、输出截断时，会优先恢复再继续，而不是直接失败。</p>
+      </div>
+    </div>
+
+    <div class="slide-footer">
+      <span>实际意义：AuditAI 正在从“短对话助手”升级为“能跑长流程”的审计执行器</span>
+      <span>06 / 10</span>
+    </div>
+  </section>
+
+  <section class="slide" data-title="Skill 机制">
+    <div class="bg-grid"></div>
+    <div class="section-head compact">
+      <p class="kicker">Skill Runtime</p>
+      <h2 class="h2">Skill 支持与渐进式披露</h2>
+      <p class="lede">AuditAI 对 Skill 的支持不是“把知识库一次性灌给模型”，而是“先发现、再评分、后分阶段展开”。</p>
+    </div>
+
+    <div class="skill-layout">
+      <div class="skill-pipeline">
+        <div class="pipeline-node">
+          <strong>Skill Library</strong>
+          <span>扫描 <code>SKILL.md</code>、frontmatter、metadata.json、bindings.json</span>
+        </div>
+        <div class="pipeline-arrow"></div>
+        <div class="pipeline-node">
+          <strong>Discovery & Matching</strong>
+          <span>按任务文本、项目特征、路径重叠、直接提及与历史调用打分</span>
+        </div>
+        <div class="pipeline-arrow"></div>
+        <div class="pipeline-node">
+          <strong>Route Plan</strong>
+          <span>形成 primary / secondary / deferred skills 与 startup_reads</span>
+        </div>
+        <div class="pipeline-arrow"></div>
+        <div class="pipeline-node">
+          <strong>Runtime Invocation</strong>
+          <span>通过 Skill 工具按需读取 body / list_resources / read_resource</span>
+        </div>
+      </div>
+
+      <div class="progressive-panel">
+        <div class="progressive-title">渐进式披露阶梯</div>
+        <div class="stage-ladder">
+          <div class="ladder-step">catalog</div>
+          <div class="ladder-step">body</div>
+          <div class="ladder-step">references</div>
+          <div class="ladder-step">examples</div>
+          <div class="ladder-step">scripts</div>
+          <div class="ladder-step full">full</div>
+        </div>
+        <p>SessionRuntimeState 会记录技能已被加载到哪个阶段，避免一上来把所有细节都塞进上下文。</p>
+      </div>
+    </div>
+
+    <div class="tri-columns tight">
+      <div class="mini-panel">
+        <h4>先选对</h4>
+        <p>SkillDiscoveryScheduler 会结合“用户消息、项目画像、已读路径、是否直接提及”等因素给 skill 排名。</p>
+      </div>
+      <div class="mini-panel">
+        <h4>再展开</h4>
+        <p>Adapter 会先把 primary skill 的 body 做 bootstrap，后续再由模型按需加载 references / examples / scripts。</p>
+      </div>
+      <div class="mini-panel">
+        <h4>带约束执行</h4>
+        <p>每个 skill 合约都能声明 <code>allowed_tools</code>，运行时权限层会据此限制可调用工具范围。</p>
+      </div>
+    </div>
+
+    <div class="slide-footer">
+      <span>核心思想：Skill 在 AuditAI 里更像“可调度的专业工作包”，而不是静态知识附件</span>
+      <span>07 / 10</span>
+    </div>
+  </section>
+
+  <section class="slide" data-title="差异与互补">
+    <div class="bg-grid"></div>
+    <div class="section-head compact">
+      <p class="kicker">Positioning</p>
+      <h2 class="h2">与传统源码审计工具的差异与互补</h2>
+      <p class="lede">AuditAI 不是要替代全部扫描器，而是把“规则扫描、深度推理、人工协同、最终验证”串成一条闭环。</p>
+    </div>
+
+    <div class="comparison-board">
+      <div class="compare-col">
+        <h4>传统工具更擅长</h4>
+        <ul>
+          <li>批量跑规则，发现广泛可疑点</li>
+          <li>稳定覆盖常见弱点与依赖风险</li>
+          <li>在超大项目里快速给出第一轮扫描面</li>
+        </ul>
+      </div>
+      <div class="compare-col highlight">
+        <h4>AuditAI 更擅长</h4>
+        <ul>
+          <li>跨文件理解业务逻辑与权限边界</li>
+          <li>把 source 到 sink 利用链追得更完整</li>
+          <li>在同一会话中接入人工追问与验证</li>
+        </ul>
+      </div>
+      <div class="compare-col">
+        <h4>最优组合方式</h4>
+        <ul>
+          <li>扫描器负责“广”，AuditAI 负责“深”</li>
+          <li>先工具铺面，再用 Finding/Verification 收敛</li>
+          <li>最后把结果沉淀成报告、记忆和 Skill 资产</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="slide-footer">
+      <span>一句话：传统工具给线索，AuditAI 负责把线索推进成可汇报、可验证、可复盘的结论</span>
+      <span>08 / 10</span>
+    </div>
+  </section>
+
+  <section class="slide" data-title="当前缺陷">
+    <div class="bg-grid"></div>
+    <div class="section-head compact">
+      <p class="kicker">Current Gaps</p>
+      <h2 class="h2">目前的缺陷</h2>
+      <p class="lede">从源码实现来看，AuditAI 已经有了比较完整的骨架，但还处在“从可用走向好用、稳用”的阶段。</p>
+    </div>
+
+    <div class="roadmap-grid">
+      <div class="road-card">
+        <strong>稳定性与成本</strong>
+        <span>Finding Runtime、压缩恢复、工具编排链路已经很完整，但长流程成本和边界稳定性还需要继续打磨。</span>
+      </div>
+      <div class="road-card">
+        <strong>动态验证门槛</strong>
+        <span>Verification 能做 harness 与 sandbox 验证，但对项目运行环境、依赖、样本准备仍有要求。</span>
+      </div>
+      <div class="road-card">
+        <strong>资产沉淀仍在扩库</strong>
+        <span>Skill、规则、模板都已接入运行时，但高质量行业模板与经验资产还需要继续扩充。</span>
+      </div>
+      <div class="road-card">
+        <strong>平台处于双栈并进期</strong>
+        <span>当前既有固定阶段多 Agent，也有 Finding Runtime 新栈，后续还需要继续收敛统一体验。</span>
+      </div>
+    </div>
+
+    <div class="slide-footer">
+      <span>判断：这些缺陷更像阶段性工程问题，不是方向性问题</span>
+      <span>09 / 10</span>
+    </div>
+  </section>
+
+  <section class="slide" data-title="后续计划">
+    <div class="bg-grid"></div>
+    <div class="section-head compact">
+      <p class="kicker">Next Plan</p>
+      <h2 class="h2">后续工作计划</h2>
+      <p class="lede">下一阶段重点不是继续堆概念，而是把“审计效果、稳定性、资产运营”三件事一起做实。</p>
+    </div>
+
+    <div class="plan-columns">
+      <div class="plan-card now">
+        <span class="plan-tag">Now</span>
+        <strong>提升稳定性</strong>
+        <p>继续优化 Finding Runtime 的状态转移、恢复分支、压缩链路与会话可观测性。</p>
+      </div>
+      <div class="plan-card next">
+        <span class="plan-tag">Next</span>
+        <strong>增强验证闭环</strong>
+        <p>围绕高价值漏洞链补强 run_code、sandbox、extract / verify 相关能力，降低人工补验证成本。</p>
+      </div>
+      <div class="plan-card later">
+        <span class="plan-tag">Later</span>
+        <strong>沉淀 Skill 与规则资产</strong>
+        <p>把项目经验沉淀成更标准化的 Skill、规则和报告模板，提升跨项目复用效率。</p>
+      </div>
+      <div class="plan-card vision">
+        <span class="plan-tag">Vision</span>
+        <strong>走向可运营平台</strong>
+        <p>增强管理视图、报告视图、会话追踪和质量指标，让 AuditAI 从“工具”走向“审计平台”。</p>
+      </div>
+    </div>
+
+    <div class="closing-banner">
+      <strong>阶段目标：</strong>
+      <span>从“能审”升级为“审得稳、审得深、审得可回放、审得可运营”。</span>
+    </div>
+
+    <div class="slide-footer">
+      <span>建议汇报收尾：AuditAI 已形成核心框架，下一阶段重点是把审计能力平台化、产品化</span>
+      <span>10 / 10</span>
+    </div>
+  </section>
+
+</div>
+
+<script src="./assets/runtime.js"></script>
+<script>
+(function () {
+  const slideIndex = 3;
+  const slide = document.querySelectorAll('.slide')[slideIndex];
+  if (!slide) return;
+  const nodes = Array.from(slide.querySelectorAll('.ring-node'));
+  const logs = Array.from(slide.querySelectorAll('.log-line'));
+  const continuePill = slide.querySelector('.switch-pill.continue');
+  const stopPill = slide.querySelector('.switch-pill.stop');
+  let step = 0;
+
+  function paint() {
+    nodes.forEach((node, index) => {
+      node.classList.toggle('active', index === step);
+      node.classList.toggle('dimmed', index !== step);
+    });
+    logs.forEach((line, index) => {
+      line.classList.toggle('active', index === step);
+      line.classList.toggle('done', index < step);
+    });
+    continuePill.classList.toggle('active', step < 5);
+    stopPill.classList.toggle('active', step === 5);
+  }
+
+  paint();
+  window.setInterval(() => {
+    step = (step + 1) % nodes.length;
+    paint();
+  }, 1600);
+})();
+</script>
+</body>
+</html>

@@ -15,6 +15,8 @@ from app.services.skill_file_service import SkillFileService
 MAX_RECALLS = 5
 MAX_CONTENT_CHARS = 3200
 PROJECT_MEMORY_LIMIT = 8
+RUNTIME_MEMORY_HEADER = "## Runtime Memory OS"
+RUNTIME_RULE_SET_ALLOWLIST = {"owasp top 10"}
 PROJECT_MEMORY_FILES = ("CLAUDE.md", "CLAW.md", "CLAUDE.local.md", "CLAW.local.md")
 PROJECT_MEMORY_DIRS = ((".claude", "CLAUDE.md"), (".claw", "CLAW.md"))
 PROJECT_RULE_DIRS = ((".claude", "rules"), (".claw", "rules"))
@@ -80,6 +82,8 @@ class RuntimeMemoryManager:
                 )
             )
             for rule_set in rule_sets:
+                if not _is_runtime_rule_set_allowed(rule_set):
+                    continue
                 rules = list(
                     db.scalars(
                         select(AuditRule)
@@ -359,3 +363,37 @@ def build_memory_message(record: RuntimeMemoryRecord) -> str:
             record.content,
         ]
     ).strip()
+
+
+def build_runtime_memory_prompt(base_prompt: str, memories: list[RuntimeMemoryRecord] | None) -> str:
+    base = strip_runtime_memory_section(base_prompt)
+    rendered: list[str] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for memory in memories or []:
+        key = (
+            str(memory.memory_kind or ""),
+            str(memory.source_type or ""),
+            str(memory.source_ref or ""),
+            str(memory.title or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        message = build_memory_message(memory).strip()
+        if message:
+            rendered.append(message)
+    if not rendered:
+        return base
+    return "\n\n".join(section for section in [base, RUNTIME_MEMORY_HEADER, *rendered] if section)
+
+
+def strip_runtime_memory_section(prompt: str) -> str:
+    text = str(prompt or "").strip()
+    marker_index = text.find(RUNTIME_MEMORY_HEADER)
+    if marker_index < 0:
+        return text
+    return text[:marker_index].rstrip()
+
+
+def _is_runtime_rule_set_allowed(rule_set: AuditRuleSet) -> bool:
+    return str(getattr(rule_set, "name", "") or "").strip().lower() in RUNTIME_RULE_SET_ALLOWLIST

@@ -181,6 +181,7 @@ async def test_list_managed_local_directories_returns_first_level_directories(mo
 
     managed_root_path = make_managed_root()
     (managed_root_path / "alpha").mkdir()
+    (managed_root_path / ".auditai_workspaces").mkdir()
     (managed_root_path / "beta").mkdir()
     (managed_root_path / "README.md").write_text("ignore me", encoding="utf-8")
     original_root = projects_endpoint.settings.MANAGED_PROJECTS_ROOT

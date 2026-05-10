@@ -606,7 +606,7 @@ class BaseAgent(ABC):
 
     def _compose_runtime_memory_prompt(self) -> str:
         from app.services.finding_runtime.models import RuntimeMemoryRecord
-        from app.services.runtime_core.memory_runtime import build_memory_message
+        from app.services.runtime_core.memory_runtime import build_runtime_memory_prompt
 
         memory_runtime = self._memory_runtime_metadata()
         base_prompt = str(memory_runtime.get("base_system_prompt") or self.config.system_prompt or "").strip()
@@ -619,11 +619,8 @@ class BaseAgent(ABC):
                     record = RuntimeMemoryRecord(**item)
                 except TypeError:
                     continue
-                rendered.append(build_memory_message(record))
-        if not rendered:
-            return base_prompt
-        sections = [section for section in [base_prompt, "## Runtime Memory OS", *rendered] if section]
-        return "\n\n".join(sections)
+                rendered.append(record)
+        return build_runtime_memory_prompt(base_prompt, rendered)
 
     def _apply_runtime_memory_prompt_overlay(self) -> None:
         memory_runtime = self._state.metadata.get("memory_runtime") or {}

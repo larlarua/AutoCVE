@@ -8,10 +8,12 @@ import {
   KeyRound,
   Loader2,
   MessageSquareMore,
+  Plus,
   RefreshCw,
   Save,
   ServerCog,
   Sparkles,
+  Trash2,
   Wand2,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -31,6 +33,7 @@ import {
   type AgentModelConfig,
   type AgentModelTestResponse,
   type AgentType,
+  type ModelProfileConfig,
   type ProviderOption,
   getModelConfig,
   getModelProviders,
@@ -84,6 +87,8 @@ const DEFAULT_AGENT_CONFIG: AgentModelConfig = {
   alwaysThinkingEnabled: false,
 };
 
+type GlobalModelConfig = Omit<ModelProfileConfig, 'id' | 'name'>;
+
 const DEFAULT_GLOBAL_ENV = '{}';
 const PANEL_CLASS =
   'rounded-[30px] border border-[rgba(176,196,187,.78)] bg-[linear-gradient(180deg,rgba(255,255,255,.98),rgba(244,249,246,.96))] shadow-[0_20px_50px_rgba(110,131,121,.10)] backdrop-blur';
@@ -132,6 +137,43 @@ function cloneAgentConfig(input?: Partial<AgentModelConfig>): AgentModelConfig {
 
 function uniqueModels(models?: string[]): string[] {
   return Array.from(new Set((models || []).filter(Boolean)));
+}
+
+function createProfileId(): string {
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
+  return `profile-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function cloneModelProfile(input?: Partial<ModelProfileConfig>): ModelProfileConfig {
+  return {
+    id: input?.id || createProfileId(),
+    name: input?.name?.trim() || '未命名方案',
+    llmProvider: input?.llmProvider || '',
+    llmApiKey: input?.llmApiKey || '',
+    llmModel: input?.llmModel || '',
+    llmBaseUrl: input?.llmBaseUrl || '',
+    llmTimeout: input?.llmTimeout ?? null,
+    llmTemperature: input?.llmTemperature ?? null,
+    llmMaxTokens: input?.llmMaxTokens ?? null,
+    env: input?.env || {},
+  };
+}
+
+function buildProfileFromGlobal(id: string, name: string, config: GlobalModelConfig, env: Record<string, string>): ModelProfileConfig {
+  return cloneModelProfile({
+    id,
+    name,
+    llmProvider: config.llmProvider,
+    llmApiKey: config.llmApiKey,
+    llmModel: config.llmModel,
+    llmBaseUrl: config.llmBaseUrl,
+    llmTimeout: config.llmTimeout,
+    llmTemperature: config.llmTemperature,
+    llmMaxTokens: config.llmMaxTokens,
+    env,
+  });
 }
 
 interface ModelSearchSelectProps {
@@ -226,6 +268,10 @@ export function SystemConfig() {
   const [testingGlobal, setTestingGlobal] = useState(false);
   const [syncingAssets, setSyncingAssets] = useState(false);
   const [globalEnvText, setGlobalEnvText] = useState(DEFAULT_GLOBAL_ENV);
+  const [modelProfiles, setModelProfiles] = useState<ModelProfileConfig[]>([]);
+  const [selectedProfileId, setSelectedProfileId] = useState('');
+  const [profileDialogOpen, setProfileDialogOpen] = useState(false);
+  const [profileNameDraft, setProfileNameDraft] = useState('');
   const [agentEnvTexts, setAgentEnvTexts] = useState<Record<AgentType, string>>({
     orchestrator: DEFAULT_GLOBAL_ENV,
     recon: DEFAULT_GLOBAL_ENV,
@@ -248,6 +294,10 @@ export function SystemConfig() {
     () => Object.fromEntries(providers.map((item) => [item.value, item])) as Record<string, ProviderOption>,
     [providers],
   );
+  const selectedProfile = useMemo(
+    () => modelProfiles.find((profile) => profile.id === selectedProfileId) || null,
+    [modelProfiles, selectedProfileId],
+  );
 
   const loadPage = async () => {
     try {
@@ -266,6 +316,11 @@ export function SystemConfig() {
         env: llmConfig.env || {},
       });
       setGlobalEnvText(stringifyEnvPayload(llmConfig.env));
+      const profiles = Array.isArray(llmConfig.modelProfiles)
+        ? llmConfig.modelProfiles.map((profile: Partial<ModelProfileConfig>) => cloneModelProfile(profile))
+        : [];
+      setModelProfiles(profiles);
+      setSelectedProfileId((prev) => (profiles.some((profile) => profile.id === prev) ? prev : profiles[0]?.id || ''));
 
       const nextAgentConfigs = {} as Record<AgentType, AgentModelConfig>;
       const nextAgentEnvTexts = {} as Record<AgentType, string>;
@@ -294,6 +349,82 @@ export function SystemConfig() {
     setAgentEnvTexts((prev) => ({ ...prev, [agent]: value }));
   };
 
+  const openSaveProfileDialog = () => {
+    setProfileNameDraft('');
+    setProfileDialogOpen(true);
+  };
+
+  const createProfileFromCurrentGlobal = () => {
+    const name = profileNameDraft.trim();
+    if (!name) {
+      toast.error('请先输入方案名称');
+      return;
+    }
+
+    try {
+      const parsedGlobalEnv = parseEnvPayload(globalEnvText, 'Global env JSON');
+      const nextProfile = buildProfileFromGlobal(createProfileId(), name, globalConfig, parsedGlobalEnv);
+      setModelProfiles((prev) => [...prev, nextProfile]);
+      setSelectedProfileId(nextProfile.id);
+      setProfileDialogOpen(false);
+      setProfileNameDraft('');
+      toast.success('已添加模型方案，点击保存模型配置后持久化');
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to create model profile');
+    }
+  };
+
+  const updateSelectedProfileFromCurrentGlobal = () => {
+    if (!selectedProfile) {
+      toast.error('请先选择一个模型方案');
+      return;
+    }
+
+    try {
+      const parsedGlobalEnv = parseEnvPayload(globalEnvText, 'Global env JSON');
+      const nextProfile = buildProfileFromGlobal(selectedProfile.id, selectedProfile.name, globalConfig, parsedGlobalEnv);
+      setModelProfiles((prev) => prev.map((profile) => (profile.id === selectedProfile.id ? nextProfile : profile)));
+      toast.success('已更新当前方案，点击保存模型配置后持久化');
+    } catch (error: any) {
+      toast.error(error?.message || 'Failed to update model profile');
+    }
+  };
+
+  const applySelectedProfile = () => {
+    if (!selectedProfile) {
+      toast.error('请先选择一个模型方案');
+      return;
+    }
+
+    setGlobalConfig((prev) => ({
+      ...prev,
+      llmProvider: selectedProfile.llmProvider || 'openai',
+      llmApiKey: selectedProfile.llmApiKey || '',
+      llmModel: selectedProfile.llmModel || '',
+      llmBaseUrl: selectedProfile.llmBaseUrl || '',
+      llmTimeout: selectedProfile.llmTimeout ?? prev.llmTimeout,
+      llmTemperature: selectedProfile.llmTemperature ?? prev.llmTemperature,
+      llmMaxTokens: selectedProfile.llmMaxTokens ?? prev.llmMaxTokens,
+      env: selectedProfile.env || {},
+    }));
+    setGlobalEnvText(stringifyEnvPayload(selectedProfile.env));
+    toast.success(`已应用模型方案：${selectedProfile.name}`);
+  };
+
+  const deleteSelectedProfile = () => {
+    if (!selectedProfile) {
+      toast.error('请先选择一个模型方案');
+      return;
+    }
+
+    setModelProfiles((prev) => {
+      const next = prev.filter((profile) => profile.id !== selectedProfile.id);
+      setSelectedProfileId(next[0]?.id || '');
+      return next;
+    });
+    toast.success('已删除当前方案，点击保存模型配置后持久化');
+  };
+
   const saveAll = async () => {
     try {
       setSaving(true);
@@ -312,6 +443,7 @@ export function SystemConfig() {
           ...globalConfig,
           env: parsedGlobalEnv,
           alwaysThinkingEnabled: false,
+          modelProfiles: modelProfiles.map((profile) => cloneModelProfile(profile)),
           agentConfigs: nextAgentConfigs,
         },
       });
@@ -460,6 +592,67 @@ export function SystemConfig() {
               保存模型配置
             </Button>
           </div>
+        </div>
+      </section>
+
+      <section className={cn(PANEL_CLASS, 'p-6 md:p-7')}>
+        <div className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
+          <div className="max-w-2xl">
+            <div className="text-xs uppercase tracking-[0.18em] text-[#789187]">Model Profiles</div>
+            <h2 className="mt-2 text-2xl font-bold text-[#2f2418]">模型配置方案</h2>
+            <p className="mt-2 text-sm leading-7 text-[#62766d]">
+              保存常用的全局模型组合，例如智谱、DeepSeek、Claude 或代理站配置。应用方案只覆盖全局默认模型，不修改各 Agent 的独立模型。
+            </p>
+          </div>
+          <div className="grid w-full gap-3 xl:w-[620px] xl:grid-cols-[minmax(0,1fr)_auto]">
+            <Select value={selectedProfileId} onValueChange={setSelectedProfileId}>
+              <SelectTrigger className={INPUT_CLASS}>
+                <SelectValue placeholder={modelProfiles.length ? '选择模型方案' : '暂无模型方案'} />
+              </SelectTrigger>
+              <SelectContent>
+                {modelProfiles.map((profile) => (
+                  <SelectItem key={profile.id} value={profile.id}>
+                    {profile.name} · {profile.llmProvider || 'provider'} / {profile.llmModel || 'model'}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" className="rounded-full border-[rgba(176,196,187,.82)] bg-white/82" onClick={openSaveProfileDialog}>
+                <Plus className="mr-2 h-4 w-4" /> 保存为方案
+              </Button>
+              <Button variant="outline" className="rounded-full border-[rgba(176,196,187,.82)] bg-white/82" onClick={updateSelectedProfileFromCurrentGlobal} disabled={!selectedProfile}>
+                <Save className="mr-2 h-4 w-4" /> 更新方案
+              </Button>
+              <Button className="rounded-full border border-[#6c9681] bg-[#6c9681] text-white hover:bg-[#5b846f]" onClick={applySelectedProfile} disabled={!selectedProfile}>
+                应用方案
+              </Button>
+              <Button variant="outline" className="rounded-full border-[rgba(209,170,158,.82)] bg-white/82 text-[#9a4d3d] hover:text-[#873b2e]" onClick={deleteSelectedProfile} disabled={!selectedProfile}>
+                <Trash2 className="mr-2 h-4 w-4" /> 删除
+              </Button>
+            </div>
+          </div>
+        </div>
+        <div className="mt-5 flex flex-wrap gap-2 text-xs text-[#6d8178]">
+          {modelProfiles.length ? (
+            modelProfiles.map((profile) => (
+              <button
+                key={profile.id}
+                type="button"
+                onClick={() => setSelectedProfileId(profile.id)}
+                className={cn(
+                  'rounded-full border px-3 py-1.5 transition',
+                  selectedProfileId === profile.id
+                    ? 'border-[#6c9681] bg-[rgba(108,150,129,.14)] text-[#3f6555]'
+                    : 'border-[rgba(184,203,194,.72)] bg-white/78 hover:bg-[#f3f8f5]',
+                )}
+              >
+                {profile.name}
+              </button>
+            ))
+          ) : (
+            <span className="rounded-full border border-dashed border-[rgba(184,203,194,.9)] px-3 py-1.5">还没有保存的模型方案</span>
+          )}
         </div>
       </section>
 
@@ -668,6 +861,39 @@ export function SystemConfig() {
           );
         })}
       </section>
+
+      <Dialog open={profileDialogOpen} onOpenChange={setProfileDialogOpen}>
+        <DialogContent className="border-[rgba(176,196,187,.78)] bg-[rgba(252,254,253,.98)] sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="text-2xl font-black text-[#2f2418]">保存模型方案</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <Label className="text-sm font-semibold text-[#31423a]">方案名称</Label>
+            <Input
+              className={INPUT_CLASS}
+              value={profileNameDraft}
+              onChange={(event) => setProfileNameDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  createProfileFromCurrentGlobal();
+                }
+              }}
+              placeholder="例如：智谱 GLM / DeepSeek / Claude"
+              autoFocus
+            />
+            <p className="text-xs leading-6 text-[#6d8178]">会保存当前全局 provider、model、API Key、Base URL、参数和 Env JSON。</p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setProfileDialogOpen(false)}>
+              取消
+            </Button>
+            <Button className="bg-[#6c9681] text-white hover:bg-[#5b846f]" onClick={createProfileFromCurrentGlobal}>
+              保存方案
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={testDialogOpen} onOpenChange={setTestDialogOpen}>
         <DialogContent className="flex w-[min(1120px,calc(100vw-1.5rem))] max-w-6xl flex-col overflow-hidden border-[rgba(215,194,161,.8)] bg-[linear-gradient(180deg,rgba(255,255,255,.98),rgba(249,243,233,.98))] p-0 sm:max-h-[88vh]">

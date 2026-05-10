@@ -2833,6 +2833,8 @@ def _find_managed_project_root_fallback(project: Project) -> Optional[str]:
 
     entries: list[tuple[str, str]] = []
     for name in os.listdir(managed_root):
+        if name == ".auditai_workspaces":
+            continue
         path = os.path.join(managed_root, name)
         if os.path.isdir(path):
             entries.append((name, path))
@@ -2872,7 +2874,6 @@ async def _get_project_root(
 ) -> str:
     """Prepare a local working copy for the project."""
     import subprocess
-    import tempfile
     from urllib.parse import urlparse, urlunparse
     from app.services.zip_storage import load_project_zip
 
@@ -2890,7 +2891,9 @@ async def _get_project_root(
         if is_task_cancelled(task_id):
             raise asyncio.CancelledError("Task cancelled")
 
-    base_path = os.path.join(tempfile.gettempdir(), "auditai", task_id)
+    safe_task_id = re.sub(r"[^a-zA-Z0-9_.-]+", "-", str(task_id or "task")).strip(".-") or "task"
+    workspace_root = os.path.join(settings.MANAGED_PROJECTS_ROOT, ".auditai_workspaces")
+    base_path = os.path.join(workspace_root, safe_task_id)
     if os.path.exists(base_path):
         shutil.rmtree(base_path, ignore_errors=True)
     os.makedirs(base_path, exist_ok=True)

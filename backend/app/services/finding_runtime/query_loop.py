@@ -397,6 +397,7 @@ class QueryLoop:
 
             finalize_payload = self._extract_finalize_payload(records)
             if finalize_payload is not None:
+                finalize_terminal_action = self._extract_finalize_terminal_action(records)
                 return self._finalize_terminal_result(
                     session_id=session_id,
                     turn_id=turn_id,
@@ -407,7 +408,7 @@ class QueryLoop:
                     assistant_message_id=assistant_message_id,
                     tool_call_ids=tool_call_ids,
                     tool_result_message_ids=tool_result_message_ids,
-                    terminal_action=RuntimeTerminalAction.FINALIZE_FINDING,
+                    terminal_action=finalize_terminal_action,
                     completion_mode=RuntimeCompletionMode.FINALIZE_TOOL,
                     final_payload=finalize_payload,
                 )
@@ -1234,8 +1235,6 @@ class QueryLoop:
     @staticmethod
     def _extract_finalize_payload(records) -> dict[str, Any] | None:
         for record in records or []:
-            if getattr(getattr(record, "request", None), "name", "") != "FinalizeFinding":
-                continue
             result = getattr(record, "result", None)
             if result is None or getattr(result, "is_error", False):
                 continue
@@ -1244,6 +1243,28 @@ class QueryLoop:
             if isinstance(final_payload, dict):
                 return dict(final_payload)
         return None
+
+    @staticmethod
+    def _extract_finalize_terminal_action(records) -> RuntimeTerminalAction:
+        for record in records or []:
+            result = getattr(record, "result", None)
+            if result is None or getattr(result, "is_error", False):
+                continue
+            payload = dict(getattr(result, "output_payload", {}) or {})
+            if not isinstance(payload.get("final_payload"), dict):
+                continue
+            raw_action = str(payload.get("terminal_action") or "").strip()
+            if raw_action:
+                try:
+                    return RuntimeTerminalAction(raw_action)
+                except ValueError:
+                    pass
+            tool_name = str(getattr(getattr(record, "request", None), "name", "") or "")
+            if tool_name == "FinalizeTriageBatch":
+                return RuntimeTerminalAction.FINALIZE_TRIAGE_BATCH
+            if tool_name == "FinalizeTriage":
+                return RuntimeTerminalAction.FINALIZE_TRIAGE
+        return RuntimeTerminalAction.FINALIZE_FINDING
 
     def _should_issue_terminal_action_nudge(
         self,

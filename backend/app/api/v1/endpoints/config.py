@@ -69,6 +69,19 @@ class AgentModelConfigSchema(BaseModel):
     alwaysThinkingEnabled: Optional[bool] = None
 
 
+class ModelProfileSchema(BaseModel):
+    id: str
+    name: str
+    llmProvider: Optional[str] = None
+    llmApiKey: Optional[str] = None
+    llmModel: Optional[str] = None
+    llmBaseUrl: Optional[str] = None
+    llmTimeout: Optional[int] = None
+    llmTemperature: Optional[float] = None
+    llmMaxTokens: Optional[int] = None
+    env: Dict[str, str] = Field(default_factory=dict)
+
+
 class LLMConfigSchema(BaseModel):
     llmProvider: Optional[str] = None
     llmApiKey: Optional[str] = None
@@ -97,6 +110,7 @@ class LLMConfigSchema(BaseModel):
     env: Dict[str, str] = Field(default_factory=dict)
     alwaysThinkingEnabled: Optional[bool] = None
     agentConfigs: Dict[str, AgentModelConfigSchema] = Field(default_factory=dict)
+    modelProfiles: list[ModelProfileSchema] = Field(default_factory=list)
 
 
 class OtherConfigSchema(BaseModel):
@@ -254,6 +268,19 @@ def _encrypt_config(config: Dict[str, Any], sensitive_fields: list[str]) -> Dict
                     if value not in (None, "")
                 }
     encrypted["agentConfigs"] = agent_configs
+    if "modelProfiles" in encrypted:
+        model_profiles = encrypted.get("modelProfiles") or []
+        if isinstance(model_profiles, list):
+            for payload in model_profiles:
+                if isinstance(payload, dict) and payload.get("llmApiKey"):
+                    payload["llmApiKey"] = encrypt_sensitive_data(payload["llmApiKey"])
+                if isinstance(payload, dict) and isinstance(payload.get("env"), dict):
+                    payload["env"] = {
+                        key: encrypt_sensitive_data(str(value))
+                        for key, value in payload["env"].items()
+                        if value not in (None, "")
+                    }
+        encrypted["modelProfiles"] = model_profiles
     return encrypted
 
 
@@ -280,6 +307,19 @@ def _decrypt_config(config: Dict[str, Any], sensitive_fields: list[str]) -> Dict
                     if value not in (None, "")
                 }
     decrypted["agentConfigs"] = agent_configs
+    if "modelProfiles" in decrypted:
+        model_profiles = decrypted.get("modelProfiles") or []
+        if isinstance(model_profiles, list):
+            for payload in model_profiles:
+                if isinstance(payload, dict) and payload.get("llmApiKey"):
+                    payload["llmApiKey"] = decrypt_sensitive_data(payload["llmApiKey"])
+                if isinstance(payload, dict) and isinstance(payload.get("env"), dict):
+                    payload["env"] = {
+                        key: decrypt_sensitive_data(value)
+                        for key, value in payload["env"].items()
+                        if value not in (None, "")
+                    }
+        decrypted["modelProfiles"] = model_profiles
     return decrypted
 
 
@@ -301,6 +341,7 @@ def get_default_config() -> Dict[str, Any]:
             "toolTimeout": getattr(settings, "TOOL_TIMEOUT_SECONDS", 60),
             "env": {},
             "alwaysThinkingEnabled": False,
+            "modelProfiles": [],
             "geminiApiKey": settings.GEMINI_API_KEY or "",
             "openaiApiKey": settings.OPENAI_API_KEY or "",
             "claudeApiKey": settings.CLAUDE_API_KEY or "",
@@ -421,7 +462,7 @@ async def update_my_config(
     if config_in.llmConfig is not None:
         existing_llm = json.loads(record.llm_config) if record.llm_config else {}
         existing_llm = _decrypt_config(existing_llm, SENSITIVE_LLM_FIELDS)
-        incoming_llm = config_in.llmConfig.model_dump(exclude_none=True)
+        incoming_llm = config_in.llmConfig.model_dump(exclude_none=True, exclude_unset=True)
         if "agentConfigs" in incoming_llm:
             incoming_llm["agentConfigs"] = {
                 **(existing_llm.get("agentConfigs") or {}),

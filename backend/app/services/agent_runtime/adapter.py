@@ -1,29 +1,32 @@
 from __future__ import annotations
 
 import inspect
+from typing import Any
 
 from app.services.agent.skill_service import SkillService
-from app.services.runtime_core.memory_runtime import RuntimeMemoryManager, build_runtime_memory_prompt
 from app.services.finding_runtime.models import RuntimeMessageRole, TranscriptItem
 from app.services.finding_runtime.query_transitions import hydrate_query_loop_state
 from app.services.finding_runtime.skills import RuntimeSkillCatalog
+from app.services.runtime_core.memory_runtime import RuntimeMemoryManager, build_memory_message
 from app.services.runtime_core.skill_discovery import SkillDiscoveryScheduler
 
 
-class FindingRuntimeAdapter:
-    DEFAULT_USER_MESSAGE = "请继续围绕当前 Finding 目标进行审计"
-
+class AgentRuntimeAdapter:
     def __init__(
         self,
         *,
         session_store,
         runner,
+        agent_type: str,
+        default_user_message: str,
         skill_catalog: RuntimeSkillCatalog | None = None,
         memory_manager: RuntimeMemoryManager | None = None,
         discovery_scheduler: SkillDiscoveryScheduler | None = None,
     ):
         self._session_store = session_store
         self._runner = runner
+        self._agent_type = str(agent_type or "").strip()
+        self._default_user_message = str(default_user_message or "").strip()
         self._skill_catalog = skill_catalog or RuntimeSkillCatalog()
         self._memory_manager = memory_manager or RuntimeMemoryManager(
             session_factory=getattr(session_store, "_session_factory", None)
@@ -38,26 +41,32 @@ class FindingRuntimeAdapter:
         system_prompt: str,
         recon_payload: dict,
         user_message: str | None = None,
-        model_name: str = "finding-runtime",
+        model_name: str | None = None,
         on_session_created=None,
         on_user_message_created=None,
-    ) -> dict:
+    ) -> dict[str, Any]:
+        session_recon_payload = dict(recon_payload or {})
+        session_recon_payload.setdefault("agent_type", self._agent_type)
+        session_metadata = dict(session_recon_payload.get("metadata") or {})
+        session_metadata.setdefault("agent_type", self._agent_type)
+        session_recon_payload["metadata"] = session_metadata
         session_id = self._session_store.create_session(
             project_id=project_id,
             task_id=task_id,
             runtime_stack="runtime",
             system_prompt=system_prompt,
-            recon_payload=recon_payload,
+            recon_payload=session_recon_payload,
         )
         if on_session_created is not None:
             maybe_awaitable = on_session_created(session_id)
             if inspect.isawaitable(maybe_awaitable):
                 await maybe_awaitable
-        effective_user_message = user_message or self.DEFAULT_USER_MESSAGE
+
+        effective_user_message = user_message or self._default_user_message
         skill_context, skill_bootstrap_text, discovery_snapshot = await self._resolve_skill_context(
             session_id=session_id,
             user_message=effective_user_message,
-            recon_payload=recon_payload,
+            recon_payload=session_recon_payload,
         )
         self._session_store.replace_skills(
             session_id,
@@ -66,9 +75,9 @@ class FindingRuntimeAdapter:
         )
 
         memory_bundle = await self._memory_manager.preload(
-            agent_type="finding",
+            agent_type=self._agent_type,
             system_prompt=system_prompt,
-            recon_payload=recon_payload,
+            recon_payload=session_recon_payload,
             user_message=effective_user_message,
             skill_context={
                 "prompt": skill_context.prompt,
@@ -94,16 +103,17 @@ class FindingRuntimeAdapter:
 
         user_message_id = self._session_store.append_message(
             session_id,
-            TranscriptItem(
-                role=RuntimeMessageRole.USER,
-                content=effective_user_message,
-            ),
+            TranscriptItem(role=RuntimeMessageRole.USER, content=effective_user_message),
         )
         if on_user_message_created is not None:
             maybe_awaitable = on_user_message_created(user_message_id)
             if inspect.isawaitable(maybe_awaitable):
                 await maybe_awaitable
-        runner_result = await self._runner.run_once(session_id=session_id, model_name=model_name)
+
+        runner_result = await self._runner.run_once(
+            session_id=session_id,
+            model_name=model_name or self._agent_type,
+        )
         return {
             "session_id": session_id,
             "runner_result": runner_result,
@@ -114,12 +124,17 @@ class FindingRuntimeAdapter:
             },
         }
 
-    async def refresh_session_context(self, *, session_id: str) -> dict:
+    async def refresh_session_context(self, *, session_id: str) -> dict[str, Any]:
         snapshot = self._session_store.load_session_snapshot(session_id)
         runtime_state = self._session_store.load_runtime_state(session_id)
         query_loop_state = self._session_store.load_query_loop_state(session_id)
-        base_system_prompt = str(runtime_state.metadata.get("base_system_prompt") or snapshot.session.system_prompt or "").strip()
-        effective_user_message = self._resolve_latest_user_message(snapshot.messages, runtime_state.metadata.get("last_user_message"))
+        base_system_prompt = str(
+            runtime_state.metadata.get("base_system_prompt") or snapshot.session.system_prompt or ""
+        ).strip()
+        effective_user_message = self._resolve_latest_user_message(
+            snapshot.messages,
+            runtime_state.metadata.get("last_user_message"),
+        )
         recon_payload = dict(snapshot.session.recon_payload or {})
         skill_context, skill_bootstrap_text, discovery_snapshot = await self._resolve_skill_context(
             session_id=session_id,
@@ -169,7 +184,7 @@ class FindingRuntimeAdapter:
     async def _resolve_skill_context(self, *, session_id: str, user_message: str, recon_payload: dict):
         skill_context = await self._skill_catalog.preload(
             user_id=None,
-            agent_type="finding",
+            agent_type=self._agent_type,
             context={
                 "recon_data": recon_payload,
                 "project_info": recon_payload.get("project_info", {}),
@@ -179,7 +194,7 @@ class FindingRuntimeAdapter:
         )
         runtime_state = self._session_store.load_runtime_state(session_id)
         discovery_snapshot = self._discovery_scheduler.discover(
-            agent_type="finding",
+            agent_type=self._agent_type,
             runtime_state=runtime_state,
             available_skills=skill_context.available_skills,
             matched_skills=skill_context.matched_skills,
@@ -192,7 +207,7 @@ class FindingRuntimeAdapter:
         skill_bootstrap_text = ""
         if primary_skill:
             try:
-                skill_body = await SkillService.get_skill_body(None, primary_skill, agent_type="finding")
+                skill_body = await SkillService.get_skill_body(None, primary_skill, agent_type=self._agent_type)
             except Exception:
                 skill_body = None
             if isinstance(skill_body, dict):
@@ -204,7 +219,7 @@ class FindingRuntimeAdapter:
                 ).strip()
                 if not skill_text:
                     skill_text = str(skill_body)
-                skill_bootstrap_text = f"主技能启动内容：{primary_skill}\n\n{skill_text[:6000]}"
+                skill_bootstrap_text = f"Primary skill bootstrap: {primary_skill}\n\n{skill_text[:6000]}"
         return skill_context, skill_bootstrap_text, discovery_snapshot
 
     def _apply_discovery_snapshot(self, skill_context, discovery_snapshot: dict[str, object]) -> None:
@@ -216,25 +231,28 @@ class FindingRuntimeAdapter:
             for item in skill_context.available_skills
             if self._skill_ref(item)
         }
-        ranked_refs = [
-            str(item.get("skill_ref") or "").strip()
-            for item in ranked
-            if str(item.get("skill_ref") or "").strip()
-        ]
         positive_refs = [
             str(item.get("skill_ref") or "").strip()
             for item in ranked
             if int(item.get("score") or 0) > 0 and str(item.get("skill_ref") or "").strip()
         ]
         secondary_refs = [ref for ref in positive_refs if ref != selected_skill]
-        deferred_refs = [ref for ref in available_by_ref.keys() if ref not in ([selected_skill] if selected_skill else []) and ref not in secondary_refs]
+        deferred_refs = [
+            ref
+            for ref in available_by_ref.keys()
+            if ref not in ([selected_skill] if selected_skill else []) and ref not in secondary_refs
+        ]
         if selected_skill:
             route_plan["primary_skill"] = selected_skill
             skill_file_path = ((available_by_ref.get(selected_skill) or {}).get("paths") or {}).get("skill_file_path")
             route_plan["startup_reads"] = [skill_file_path] if skill_file_path else route_plan.get("startup_reads", [])
         route_plan["secondary_skills"] = secondary_refs
         route_plan["deferred_skills"] = deferred_refs
-        route_plan["discovery_ranked_skills"] = ranked_refs
+        route_plan["discovery_ranked_skills"] = [
+            str(item.get("skill_ref") or "").strip()
+            for item in ranked
+            if str(item.get("skill_ref") or "").strip()
+        ]
         route_plan["discovery_selected_skill"] = selected_skill
         route_plan["selection_reason"] = list(route_plan.get("selection_reason") or []) + self._selection_reason_lines(ranked)
         skill_context.route_plan = route_plan
@@ -242,10 +260,6 @@ class FindingRuntimeAdapter:
         if discovery_message:
             base_route_message = str(skill_context.route_message or "").strip()
             skill_context.route_message = "\n\n".join(part for part in [base_route_message, discovery_message] if part)
-
-    @staticmethod
-    def _skill_ref(item: dict) -> str:
-        return str(item.get("slug") or item.get("id") or item.get("name") or "").strip()
 
     def _persist_runtime_metadata(
         self,
@@ -260,13 +274,13 @@ class FindingRuntimeAdapter:
         runtime_state.metadata["base_system_prompt"] = base_system_prompt
         runtime_state.metadata["last_user_message"] = user_message
         runtime_state.record_skill_catalog_snapshot(
-            agent_type="finding",
+            agent_type=self._agent_type,
             available_skills=self._skill_refs(skill_context.available_skills),
             matched_skills=self._skill_refs(skill_context.matched_skills),
             primary_skill=str(skill_context.route_plan.get("primary_skill") or "").strip() or None,
         )
         runtime_state.record_skill_discovery_snapshot(
-            agent_type="finding",
+            agent_type=self._agent_type,
             selected_skill=str(discovery_snapshot.get("selected_skill") or "").strip() or None,
             ranked_candidates=list(discovery_snapshot.get("ranked_candidates") or []),
             latest_user_message=user_message,
@@ -274,10 +288,14 @@ class FindingRuntimeAdapter:
         self._session_store.replace_runtime_state(session_id, runtime_state)
 
     @staticmethod
-    def _skill_refs(items: list[dict]) -> list[str]:
+    def _skill_ref(item: dict) -> str:
+        return str(item.get("slug") or item.get("id") or item.get("name") or "").strip()
+
+    @classmethod
+    def _skill_refs(cls, items: list[dict]) -> list[str]:
         refs: list[str] = []
         for item in items or []:
-            ref = str(item.get("slug") or item.get("id") or item.get("name") or "").strip()
+            ref = cls._skill_ref(item)
             if ref and ref not in refs:
                 refs.append(ref)
         return refs
@@ -293,19 +311,20 @@ class FindingRuntimeAdapter:
                 if content:
                     return content
         resolved_fallback = str(fallback or "").strip()
-        return resolved_fallback or self.DEFAULT_USER_MESSAGE
+        return resolved_fallback or self._default_user_message
 
     @staticmethod
     def _compose_system_prompt(*, base_system_prompt: str, skill_context, skill_bootstrap_text: str, memories: list) -> str:
-        prompt_sections = [build_runtime_memory_prompt(str(base_system_prompt or "").strip(), [])]
+        prompt_sections = [str(base_system_prompt or "").strip()]
         if skill_context.prompt.strip():
             prompt_sections.append(skill_context.prompt.strip())
         if skill_context.route_message.strip():
             prompt_sections.append(skill_context.route_message.strip())
         if skill_bootstrap_text.strip():
             prompt_sections.append(skill_bootstrap_text.strip())
-        prompt_without_memories = "\n\n".join(section for section in prompt_sections if section)
-        return build_runtime_memory_prompt(prompt_without_memories, memories)
+        for memory in memories or []:
+            prompt_sections.append(build_memory_message(memory))
+        return "\n\n".join(section for section in prompt_sections if section)
 
     @staticmethod
     def _selection_reason_lines(ranked: list[dict]) -> list[str]:

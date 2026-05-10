@@ -20,10 +20,11 @@ import {
   AgentEvent,
 } from "@/shared/api/agentTasks";
 import {
+  getAuditSession,
   getAuditSessionHandoffs,
   getAuditSessionMessages,
 } from "@/shared/api/auditSessions";
-import type { AuditSessionHandoff, AuditSessionMessage } from "@/pages/AuditSession/types";
+import type { AuditSessionDetail, AuditSessionHandoff, AuditSessionMessage } from "@/pages/AuditSession/types";
 import CreateAgentTaskDialog from "@/components/agent/CreateAgentTaskDialog";
 
 // Local imports
@@ -61,8 +62,81 @@ function formatHistoricalLogTime(timestamp?: string | null): string {
   });
 }
 
-function buildRuntimeSessionLogs(messages: AuditSessionMessage[], handoffs: AuditSessionHandoff[]): LogItem[] {
+function runtimeDisplayName(value?: unknown): string | undefined {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return undefined;
+  }
+  return raw
+    .split(/[_\s-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function nestedRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function resolveRuntimeAgentName(
+  message: AuditSessionMessage | null,
+  session?: AuditSessionDetail | null,
+): string | undefined {
+  const metadata = nestedRecord(message?.metadata);
+  const payload = nestedRecord(message?.payload);
+  const payloadMetadata = nestedRecord(payload.metadata);
+  const reconPayload = nestedRecord(session?.recon_payload);
+  const sessionMetadata = nestedRecord(reconPayload.metadata);
+  return runtimeDisplayName(
+    metadata.agent_name ||
+    metadata.agent_type ||
+    metadata.agent ||
+    payload.agent_name ||
+    payload.agent_type ||
+    payload.agent ||
+    payloadMetadata.agent_name ||
+    payloadMetadata.agent_type ||
+    reconPayload.agent_name ||
+    reconPayload.agent_type ||
+    sessionMetadata.agent_name ||
+    sessionMetadata.agent_type,
+  );
+}
+
+function formatRuntimeValue(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (value === undefined || value === null) {
+    return '';
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function buildRuntimeToolContent(input: unknown, output: unknown): string | undefined {
+  const sections: string[] = [];
+  const formattedInput = formatRuntimeValue(input);
+  const formattedOutput = formatRuntimeValue(output);
+  if (formattedInput) {
+    sections.push(`Input:\n${formattedInput}`);
+  }
+  if (formattedOutput) {
+    sections.push(`Output:\n${truncateOutput(formattedOutput)}`);
+  }
+  return sections.join('\n\n') || undefined;
+}
+
+function buildRuntimeSessionLogs(
+  messages: AuditSessionMessage[],
+  handoffs: AuditSessionHandoff[],
+  session?: AuditSessionDetail | null,
+): LogItem[] {
   const logs: LogItem[] = [];
+  const toolLogIndexByUseId = new Map<string, number>();
 
   const pushLog = (id: string, timestamp: string, item: Omit<LogItem, 'id' | 'time'>) => {
     const created = createLogItem(item);
@@ -73,39 +147,61 @@ function buildRuntimeSessionLogs(messages: AuditSessionMessage[], handoffs: Audi
     });
   };
 
-  messages.forEach((message) => {
+  const sortedMessages = [...messages].sort((a, b) => a.sequence - b.sequence);
+  sortedMessages.forEach((message) => {
     const metadata = (message.metadata || {}) as Record<string, unknown>;
     const payload = (message.payload || {}) as Record<string, unknown>;
     const toolName = String(message.name || payload.tool_name || 'unknown');
     const content = message.content || '';
+    const agentName = resolveRuntimeAgentName(message, session);
 
     if (message.role === 'user' && metadata.kind === 'finalization_prompt') {
       return;
     }
 
     if (message.role === 'tool_use') {
-      pushLog(`runtime-msg-${message.id}`, message.created_at, {
+      const toolUseId = String(payload.tool_use_id || message.id);
+      const created = createLogItem({
         type: 'tool',
         title: `Tool: ${toolName}`,
-        content: payload.input ? `Input:\n${JSON.stringify(payload.input, null, 2)}` : undefined,
+        content: buildRuntimeToolContent(payload.input, undefined),
         tool: { name: toolName, status: 'running' },
-        agentName: 'Finding',
+        agentName,
+      });
+      toolLogIndexByUseId.set(toolUseId, logs.length);
+      logs.push({
+        ...created,
+        id: `runtime-tool-${toolUseId}`,
+        time: formatHistoricalLogTime(message.created_at),
       });
       return;
     }
 
     if (message.role === 'tool_result') {
-      pushLog(`runtime-msg-${message.id}`, message.created_at, {
+      const toolUseId = String(payload.tool_use_id || payload.tool_call_id || message.id);
+      const output = payload.output ?? content;
+      const toolLog: Omit<LogItem, 'id' | 'time'> = {
         type: 'tool',
-        title: `Completed: ${toolName}`,
-        content: content ? `Output:\n${truncateOutput(content)}` : undefined,
+        title: `Tool: ${toolName}`,
+        content: buildRuntimeToolContent(payload.input, output),
         tool: {
           name: toolName,
           duration: Number(metadata.duration_ms || 0),
           status: metadata.is_error ? 'failed' : 'completed',
         },
-        agentName: 'Finding',
-      });
+        agentName,
+      };
+      const existingIndex = toolLogIndexByUseId.get(toolUseId);
+      if (existingIndex !== undefined) {
+        logs[existingIndex] = {
+          ...logs[existingIndex],
+          ...createLogItem(toolLog),
+          id: logs[existingIndex].id,
+          time: logs[existingIndex].time,
+        };
+      } else {
+        pushLog(`runtime-tool-${toolUseId}`, message.created_at, toolLog);
+      }
       return;
     }
 
@@ -117,7 +213,7 @@ function buildRuntimeSessionLogs(messages: AuditSessionMessage[], handoffs: Audi
         type: isThoughtLike ? 'thinking' : 'info',
         title: isFinalAnswer ? 'Final Answer' : (trimmed.slice(0, 100) + (trimmed.length > 100 ? '...' : '') || 'Assistant'),
         content: isThoughtLike ? cleanThinkingContent(trimmed) : truncateOutput(trimmed),
-        agentName: 'Finding',
+        agentName,
       });
       return;
     }
@@ -127,7 +223,7 @@ function buildRuntimeSessionLogs(messages: AuditSessionMessage[], handoffs: Audi
         type: 'user',
         title: message.name === 'runtime_finalizer' ? 'Runtime finalizer' : 'User prompt',
         content: truncateOutput(content),
-        agentName: 'Finding',
+        agentName,
       });
       return;
     }
@@ -136,7 +232,7 @@ function buildRuntimeSessionLogs(messages: AuditSessionMessage[], handoffs: Audi
       type: 'info',
       title: `${message.role}`,
       content: truncateOutput(content),
-      agentName: 'Finding',
+      agentName,
     });
   });
 
@@ -145,7 +241,7 @@ function buildRuntimeSessionLogs(messages: AuditSessionMessage[], handoffs: Audi
       type: 'dispatch',
       title: `Handoff to ${handoff.target} (${handoff.status})`,
       content: truncateOutput(JSON.stringify(handoff.payload, null, 2)),
-      agentName: 'Finding',
+      agentName: resolveRuntimeAgentName(null, session),
     });
   });
 
@@ -272,11 +368,12 @@ function AgentAuditPageContent() {
       return [];
     }
     try {
-      const [messages, handoffs] = await Promise.all([
+      const [session, messages, handoffs] = await Promise.all([
+        getAuditSession(runtimeSessionId),
         getAuditSessionMessages(runtimeSessionId),
         getAuditSessionHandoffs(runtimeSessionId),
       ]);
-      return buildRuntimeSessionLogs(messages, handoffs);
+      return buildRuntimeSessionLogs(messages, handoffs, session);
     } catch (error) {
       console.error('[AgentAudit] Failed to load runtime session trace:', error);
       return [];

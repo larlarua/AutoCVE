@@ -12,6 +12,12 @@ from app.services.agent.tools.todo_runtime_tool import TodoWriteRuntimeTool
 from app.services.finding_runtime.models import ToolExecutionPayload
 from app.services.finding_runtime.skills import RuntimeSkillTool
 from app.services.finding_runtime.tools.finalize_finding import FinalizeFindingTool
+from app.services.triage_runtime.tools import (
+    FinalizeTriageBatchTool,
+    FinalizeTriageTool,
+    GetScanFindingTool,
+    GetTriageBatchTool,
+)
 from app.services.runtime_core.permission_runtime import ToolPermissionDecision
 from app.services.runtime_core.runtime_guardrails import (
     APPROVAL_SCOPE_SINGLE_USE,
@@ -505,6 +511,15 @@ def build_runtime_tool_registry(*, session_store, agent_tools: dict[str, AgentTo
     )
     if str(agent_type or "").strip() == "finding":
         tools.append(FinalizeFindingTool())
+    if str(agent_type or "").strip() == "triage":
+        tools.extend(
+            [
+                GetTriageBatchTool(project_root=project_root),
+                GetScanFindingTool(project_root=project_root),
+                FinalizeTriageBatchTool(project_root=project_root),
+                FinalizeTriageTool(project_root=project_root),
+            ]
+        )
     tools.extend(
         [
             TodoWriteRuntimeTool(session_store),

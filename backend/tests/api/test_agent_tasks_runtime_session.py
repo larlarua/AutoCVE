@@ -1025,9 +1025,12 @@ async def test_get_project_root_falls_back_to_managed_directory_when_zip_missing
 
 @pytest.mark.asyncio
 async def test_get_project_root_copies_persistent_zip_source_directory_when_available():
-    persistent_root = Path('D:/Projects/AuditAI/backend/.pytest-managed-projects') / str(uuid4()) / 'projects' / 'zip-demo'
+    managed_root = Path('D:/Projects/AuditAI/backend/.pytest-managed-projects') / str(uuid4()) / 'projects'
+    persistent_root = managed_root / 'zip-demo'
     persistent_root.mkdir(parents=True)
     (persistent_root / 'README.md').write_text('persistent workspace', encoding='utf-8')
+    original_root = agent_tasks_endpoint.settings.MANAGED_PROJECTS_ROOT
+    agent_tasks_endpoint.settings.MANAGED_PROJECTS_ROOT = str(managed_root)
 
     project = Project(
         id='project-zip-persistent-1',
@@ -1043,7 +1046,11 @@ async def test_get_project_root_copies_persistent_zip_source_directory_when_avai
         project_root = await agent_tasks_endpoint._get_project_root(project, 'zip-persistent-task')
         assert Path(project_root, 'README.md').read_text(encoding='utf-8') == 'persistent workspace'
         assert Path(project_root).resolve() != persistent_root.resolve()
+        assert Path(project_root).resolve().is_relative_to(
+            managed_root.resolve() / '.auditai_workspaces' / 'zip-persistent-task'
+        )
     finally:
+        agent_tasks_endpoint.settings.MANAGED_PROJECTS_ROOT = original_root
         shutil.rmtree(persistent_root.parents[2], ignore_errors=True)
 
 

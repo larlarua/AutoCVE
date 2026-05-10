@@ -4,11 +4,16 @@
 """
 
 import asyncio
+import io
 import json
 import logging
 import tempfile
 import os
+import ntpath
+import posixpath
+import socket
 import shutil
+import tarfile
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
 from dataclasses import dataclass
@@ -17,6 +22,8 @@ from .base import AgentTool, ToolResult
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+TOOL_STDOUT_CAPTURE_LIMIT = 5 * 1024 * 1024
 
 
 @dataclass
@@ -120,7 +127,7 @@ class SandboxManager:
                 "stderr": "",
                 "exit_code": -1,
             }
-        
+
         timeout = timeout or self.config.timeout
 
         # 禁用代理环境变量，防止 Docker 自动注入的代理干扰容器网络
@@ -226,6 +233,7 @@ class SandboxManager:
         timeout: Optional[int] = None,
         env: Optional[Dict[str, str]] = None,
         network_mode: str = "none",
+        artifact_paths: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         在沙箱中对指定目录执行工具命令
@@ -247,6 +255,7 @@ class SandboxManager:
                 "stdout": "",
                 "stderr": "",
                 "exit_code": -1,
+                "artifacts": {},
             }
         
         timeout = timeout or self.config.timeout
@@ -267,6 +276,9 @@ class SandboxManager:
             # 清除代理环境变量：在命令前添加 unset（双重保险）
             unset_proxy_prefix = "unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy 2>/dev/null; "
             wrapped_command = unset_proxy_prefix + command
+            docker_host_workdir = self._resolve_docker_host_workdir(host_workdir, docker_client=self._docker_client)
+            if docker_host_workdir != host_workdir:
+                logger.info("Mapped sandbox workdir for Docker bind mount: %s -> %s", host_workdir, docker_host_workdir)
 
             # 准备容器配置
             container_config = {
@@ -280,7 +292,7 @@ class SandboxManager:
                 "user": self.config.user,
                 "read_only": self.config.read_only,
                 "volumes": {
-                    host_workdir: {"bind": "/workspace", "mode": "ro"}, # 只读挂载项目代码
+                    docker_host_workdir: {"bind": "/workspace", "mode": "ro"}, # 只读挂载项目代码
                 },
                 "tmpfs": {
                     "/home/sandbox": "rw,size=100m,mode=1777",
@@ -316,13 +328,17 @@ class SandboxManager:
                 stderr = await asyncio.to_thread(
                     container.logs, stdout=False, stderr=True
                 )
-                
+                artifacts = await self._read_container_artifacts(container, artifact_paths or [])
+
                 return {
                     "success": result["StatusCode"] == 0,
-                    "stdout": stdout.decode('utf-8', errors='ignore')[:50000], # 增大日志限制
+                    "stdout": stdout.decode('utf-8', errors='ignore')[:TOOL_STDOUT_CAPTURE_LIMIT],
                     "stderr": stderr.decode('utf-8', errors='ignore')[:5000],
                     "exit_code": result["StatusCode"],
                     "error": None,
+                    "artifacts": artifacts,
+                    "host_workdir": host_workdir,
+                    "docker_host_workdir": docker_host_workdir,
                 }
                 
             except asyncio.TimeoutError:
@@ -333,6 +349,7 @@ class SandboxManager:
                     "stdout": "",
                     "stderr": "",
                     "exit_code": -1,
+                    "artifacts": {},
                 }
                 
             finally:
@@ -347,7 +364,99 @@ class SandboxManager:
                 "stdout": "",
                 "stderr": "",
                 "exit_code": -1,
+                "artifacts": {},
             }
+
+    @staticmethod
+    def _resolve_docker_host_workdir(host_workdir: str, docker_client: Any = None) -> str:
+        candidate = os.path.abspath(str(host_workdir or ""))
+        mappings: List[tuple[str, str]] = []
+
+        host_project_root = os.getenv("HOST_PROJECT_ROOT", "").strip().rstrip("/\\")
+        if host_project_root:
+            mappings.append((os.path.abspath(settings.MANAGED_PROJECTS_ROOT), host_project_root))
+
+        if docker_client is not None:
+            mappings.extend(SandboxManager._current_container_mount_mappings(docker_client))
+
+        for container_root, docker_host_root in sorted(mappings, key=lambda item: len(item[0]), reverse=True):
+            normalized_container_root = os.path.abspath(container_root)
+            if not SandboxManager._is_path_within(candidate, normalized_container_root):
+                continue
+            relative_path = os.path.relpath(candidate, normalized_container_root)
+            if relative_path == ".":
+                relative_path = ""
+            return SandboxManager._join_docker_host_path(docker_host_root, relative_path)
+
+        return host_workdir
+
+    @staticmethod
+    def _current_container_mount_mappings(docker_client: Any) -> List[tuple[str, str]]:
+        try:
+            container = docker_client.containers.get(socket.gethostname())
+            mounts = container.attrs.get("Mounts") or []
+        except Exception:
+            logger.debug("Unable to inspect current container mounts for sandbox workdir mapping", exc_info=True)
+            return []
+
+        mappings: List[tuple[str, str]] = []
+        for mount in mounts:
+            destination = str(mount.get("Destination") or "").strip()
+            source = str(mount.get("Source") or "").strip()
+            if destination and source:
+                mappings.append((destination, source))
+        return mappings
+
+    @staticmethod
+    def _is_path_within(candidate: str, root: str) -> bool:
+        try:
+            return os.path.commonpath([candidate, root]) == root
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _join_docker_host_path(root: str, relative_path: str) -> str:
+        cleaned_root = str(root or "").rstrip("/\\")
+        cleaned_relative = str(relative_path or "").replace("\\", "/").strip("/")
+        if not cleaned_relative:
+            return cleaned_root
+        if "\\" in cleaned_root or (len(cleaned_root) >= 2 and cleaned_root[1] == ":"):
+            return ntpath.normpath(ntpath.join(cleaned_root, *cleaned_relative.split("/")))
+        return posixpath.normpath(posixpath.join(cleaned_root, cleaned_relative))
+
+    async def _read_container_artifacts(self, container, artifact_paths: List[str]) -> Dict[str, Dict[str, Any]]:
+        artifacts: Dict[str, Dict[str, Any]] = {}
+        for artifact_path in artifact_paths:
+            normalized_path = str(artifact_path or "").strip()
+            if not normalized_path:
+                continue
+            try:
+                content = await asyncio.to_thread(self._read_container_file, container, normalized_path)
+                artifacts[normalized_path] = {
+                    "content": content.decode("utf-8", errors="replace"),
+                    "bytes": len(content),
+                    "encoding": "utf-8",
+                }
+            except Exception as exc:
+                artifacts[normalized_path] = {
+                    "content": "",
+                    "bytes": 0,
+                    "encoding": "utf-8",
+                    "error": str(exc),
+                }
+        return artifacts
+
+    @staticmethod
+    def _read_container_file(container, artifact_path: str) -> bytes:
+        stream, _stat = container.get_archive(artifact_path)
+        archive_bytes = b"".join(stream)
+        with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:*") as archive:
+            for member in archive.getmembers():
+                extracted = archive.extractfile(member)
+                if extracted is not None:
+                    return extracted.read()
+        return b""
+
     async def execute_python(
         self,
         code: str,

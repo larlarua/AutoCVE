@@ -26,6 +26,19 @@ export interface AgentModelConfig {
   alwaysThinkingEnabled?: boolean;
 }
 
+export interface ModelProfileConfig {
+  id: string;
+  name: string;
+  llmProvider?: string;
+  llmApiKey?: string;
+  llmModel?: string;
+  llmBaseUrl?: string;
+  llmTimeout?: number | null;
+  llmTemperature?: number | null;
+  llmMaxTokens?: number | null;
+  env?: Record<string, string>;
+}
+
 export interface UserModelConfigResponse {
   id: string;
   user_id: string;

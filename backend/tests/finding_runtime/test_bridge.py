@@ -210,6 +210,74 @@ def test_bridge_run_requires_terminal_action_for_main_audit_runner(monkeypatch):
     assert captured_runner_kwargs[0]["terminal_action_nudge_limit"] == 2
 
 
+def test_agent_runtime_bridge_uses_finding_spec_without_changing_runner_contract(monkeypatch):
+    from app.services.agent_runtime.bridge import AgentRuntimeBridge
+    from app.services.agent_runtime.specs import build_finding_runtime_spec
+
+    captured_runner_kwargs: list[dict] = []
+
+    def fake_runner_init(self, **kwargs):
+        captured_runner_kwargs.append(kwargs)
+
+    async def fake_adapter_run(self, *, project_id, task_id, system_prompt, recon_payload, user_message, model_name):
+        session_id = self._session_store.create_session(
+            project_id=project_id,
+            task_id=task_id,
+            runtime_stack="runtime",
+            system_prompt=system_prompt,
+            recon_payload=recon_payload,
+        )
+        self._session_store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content=user_message))
+        return {
+            "session_id": session_id,
+            "runner_result": TurnExecutionResult(
+                turn_id="turn-1",
+                stop_reason=RuntimeStopReason.COMPLETED,
+            ),
+            "skill_route": {},
+            "memory_counts": {"instruction": 0, "recall": 0},
+        }
+
+    async def fake_ensure_payload(self, *, session_id, model_name, max_turns, model_client, runner_result, payload_extractor, finalizer_prompts, fallback_payload_builder=None):
+        del model_name, max_turns, model_client, runner_result, payload_extractor, finalizer_prompts, fallback_payload_builder
+        return self._session_store.load_session_snapshot(session_id), {"findings": [], "summary": "stub"}
+
+    monkeypatch.setattr(
+        "app.services.agent_runtime.bridge.FindingRuntimeRunner.__init__",
+        fake_runner_init,
+    )
+    monkeypatch.setattr(
+        "app.services.agent_runtime.bridge.AgentRuntimeAdapter.run",
+        fake_adapter_run,
+    )
+    monkeypatch.setattr(
+        "app.services.agent_runtime.bridge.AgentRuntimeBridge._ensure_payload",
+        fake_ensure_payload,
+    )
+
+    bridge = AgentRuntimeBridge(
+        llm_service=FakeLLMService([]),
+        tools={},
+        spec=build_finding_runtime_spec(),
+        session_factory=build_session_factory(),
+    )
+
+    result = asyncio.run(
+        bridge.run(
+            project_id="project-1",
+            task_id="task-1",
+            system_prompt="system",
+            recon_payload={"repo": "demo"},
+            user_message="inspect",
+        )
+    )
+
+    assert result["final_payload"] == {"findings": [], "summary": "stub"}
+    assert captured_runner_kwargs[0]["require_terminal_action"] is True
+    assert captured_runner_kwargs[0]["terminal_action_nudge_limit"] == 2
+    assert "FinalizeFinding" in [tool["name"] for tool in bridge._build_tool_registry().describe_tools()]
+
+
 def test_bridge_does_not_attempt_finalizer_after_incomplete_terminal_action():
     result = TurnExecutionResult(
         turn_id="turn-1",

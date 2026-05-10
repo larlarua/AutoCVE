@@ -24,6 +24,17 @@ ORCHESTRATOR_SYSTEM_PROMPT = """你是 AuditAI 的确定性编排 Agent。
 """
 
 
+TRIAGE_RUNTIME_SYSTEM_PROMPT = """You are AuditAI's runtime triage agent.
+
+Your job is to process scan findings from the deterministic triage queue.
+For batch work, call GetTriageBatch with batch_size=5, then call GetScanFinding for every finding_id in the batch.
+Read the relevant source context with Read/Grep/Glob as needed before deciding.
+You must finish each batch by calling FinalizeTriageBatch with exactly one decision for every finding_id in the claimed batch.
+For final aggregation, call FinalizeTriage and return the tool result. Do not end with ordinary prose.
+Keep only high-quality critical/high findings that have concrete source evidence.
+"""
+
+
 @dataclass
 class ExecutionPlan:
     recon_mode: str
@@ -162,6 +173,290 @@ class OrchestratorAgent(BaseAgent):
                 message=f"{name} returned handoff to orchestrator",
             )
         await self.emit_event("dispatch_complete", f"{name} completed", metadata={"agent": name, "success": result.success})
+        return result
+
+    def _resolve_sandbox_manager(self) -> Any:
+        for toolset in (
+            self.tools,
+            getattr(self.sub_agents.get("scan"), "tools", {}),
+            getattr(self.sub_agents.get("triage"), "tools", {}),
+            getattr(self.sub_agents.get("finding"), "tools", {}),
+            getattr(self.sub_agents.get("verification"), "tools", {}),
+        ):
+            if not isinstance(toolset, dict):
+                continue
+            for tool_name in ("semgrep_scan", "sandbox_exec"):
+                tool = toolset.get(tool_name)
+                sandbox_manager = getattr(tool, "sandbox_manager", None)
+                if sandbox_manager is not None:
+                    return sandbox_manager
+        from app.services.agent.tools.sandbox_tool import SandboxManager
+
+        return SandboxManager()
+
+    def _build_scan_handoff(self, scan_data: Dict[str, Any]) -> TaskHandoff:
+        summary = scan_data.get("summary") if isinstance(scan_data.get("summary"), dict) else {}
+        total_candidates = int(summary.get("total_candidates") or 0) if isinstance(summary, dict) else 0
+        return TaskHandoff(
+            from_agent="scan",
+            to_agent="triage",
+            summary=f"Deterministic scan completed with {total_candidates} indexed candidates.",
+            work_completed=["Ran deterministic ScanPipeline with SemgrepScan."],
+            context_data={
+                "scan_run_id": scan_data.get("scan_run_id"),
+                "index_ref": scan_data.get("index_ref"),
+                "summary_ref": scan_data.get("summary_ref"),
+                "artifact_refs": scan_data.get("artifact_refs", {}),
+                "scanner_runs": scan_data.get("scanner_runs", []),
+            },
+            confidence=0.95,
+        )
+
+    async def _run_scan_pipeline(
+        self,
+        *,
+        input_data: Dict[str, Any],
+        recon_result: AgentResult,
+        config: Dict[str, Any],
+    ) -> AgentResult:
+        from app.services.scan_runtime import ScanPipeline
+
+        project_root = self._runtime_context.get("project_root")
+        recon_data = recon_result.data if isinstance(recon_result.data, dict) else {}
+        scan_plan = recon_data.get("scan_plan") if isinstance(recon_data.get("scan_plan"), dict) else {}
+        scan_plan = {
+            **scan_plan,
+            "target_paths": scan_plan.get("target_paths") or ["."],
+            "exclude_patterns": scan_plan.get("exclude_patterns") or config.get("exclude_patterns") or [],
+        }
+        await self.emit_event(
+            "phase_start",
+            "deterministic scan pipeline",
+            metadata={"phase": "scan", "scanner": "SemgrepScan"},
+        )
+
+        async def emit_scan_activity(event: Dict[str, Any]) -> None:
+            metadata = dict(event.get("metadata") or {})
+            metadata.setdefault("phase", "scan")
+            metadata.setdefault("agent", "scan")
+            event_name = str(event.get("event") or "scan_event")
+            message = str(event.get("message") or event_name)
+            if event_name == "scanner_started":
+                message = f"SemgrepScan command: {metadata.get('command_summary', '')}".strip()
+            elif event_name == "scanner_completed":
+                message = (
+                    "SemgrepScan completed "
+                    f"(exit_code={metadata.get('exit_code')}, "
+                    f"targets_scanned={metadata.get('targets_scanned')}, "
+                    f"raw={metadata.get('raw_count')}, indexed={metadata.get('indexed_count')})"
+                )
+            elif event_name == "scan_completed":
+                message = (
+                    "Scan pipeline indexed "
+                    f"{metadata.get('indexed_count')} candidates from {metadata.get('raw_count')} raw scanner findings."
+                )
+            await self.emit_event("info", message, metadata={**metadata, "scan_event": event_name})
+
+        pipeline_result = await ScanPipeline(
+            project_root=project_root,
+            sandbox_manager=self._resolve_sandbox_manager(),
+            event_sink=emit_scan_activity,
+        ).run(
+            project_id=input_data.get("project_id"),
+            task_id=input_data.get("task_id"),
+            project_profile=recon_data,
+            scan_plan=scan_plan,
+        )
+        scan_data = {
+            **pipeline_result,
+            "raw_findings": [],
+        }
+        handoff = self._build_scan_handoff(scan_data)
+        result = AgentResult(success=True, data=scan_data, metadata={"runtime_stack": "deterministic"}, handoff=handoff)
+        self._agent_results["scan"] = result.to_dict()
+        self._agent_handoffs["scan"] = handoff
+        await self.emit_debug_payload(
+            "handoff_in",
+            {
+                "from_agent": "scan",
+                "to_agent": self.agent_type.value,
+                "payload": handoff.to_dict(),
+            },
+            message="deterministic scan returned handoff to orchestrator",
+        )
+        await self.emit_event(
+            "phase_complete",
+            "scan pipeline completed",
+            metadata={"phase": "scan", "scan_run_id": scan_data.get("scan_run_id"), "index_ref": scan_data.get("index_ref")},
+        )
+        return result
+
+    def _triage_runtime_turn_limit(self, config: Dict[str, Any]) -> int:
+        for key in ("triage_runtime_max_iterations", "triage_runtime_max_turns"):
+            try:
+                parsed = int(config.get(key))
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
+        triage_agent = self.sub_agents.get("triage")
+        configured = getattr(getattr(triage_agent, "config", None), "max_iterations", None)
+        try:
+            parsed = int(configured)
+        except (TypeError, ValueError):
+            return 12
+        return max(4, min(parsed, 20))
+
+    def _build_triage_runtime_payload(
+        self,
+        *,
+        input_data: Dict[str, Any],
+        recon_result: AgentResult,
+        scan_result: AgentResult,
+    ) -> Dict[str, Any]:
+        scan_data = scan_result.data if isinstance(scan_result.data, dict) else {}
+        scan_handoff = scan_result.handoff.to_dict() if scan_result.handoff else None
+        return {
+            **input_data,
+            "recon_result": recon_result.to_dict(),
+            "recon_data": recon_result.data if isinstance(recon_result.data, dict) else {},
+            "scan_result": scan_data,
+            "index_ref": scan_data.get("index_ref"),
+            "handoff": scan_handoff,
+        }
+
+    def _build_triage_handoff(self, triage_data: Dict[str, Any]) -> TaskHandoff | None:
+        findings = triage_data.get("findings", []) if isinstance(triage_data, dict) else []
+        if not isinstance(findings, list) or not findings:
+            return None
+        return TaskHandoff(
+            from_agent="triage",
+            to_agent="verification",
+            summary=triage_data.get("summary", f"{len(findings)} scanner findings kept after triage."),
+            key_findings=findings[:20],
+            priority_areas=[finding.get("file_path", "") for finding in findings[:15] if isinstance(finding, dict) and finding.get("file_path")],
+            context_data={"triage_findings_count": len(findings), "coverage": triage_data.get("coverage", {})},
+            confidence=0.85,
+        )
+
+    async def _run_runtime_triage(
+        self,
+        *,
+        input_data: Dict[str, Any],
+        recon_result: AgentResult,
+        scan_result: AgentResult,
+        config: Dict[str, Any],
+    ) -> AgentResult:
+        from app.services.agent_runtime import AgentRuntimeBridge, build_triage_runtime_spec
+        from app.services.triage_runtime.queue import TriageQueue
+
+        scan_data = scan_result.data if isinstance(scan_result.data, dict) else {}
+        index_ref = str(scan_data.get("index_ref") or "").strip()
+        if not index_ref:
+            return AgentResult(success=False, error="ScanPipeline did not produce an index_ref for runtime triage.")
+
+        project_root = self._runtime_context.get("project_root")
+        queue = TriageQueue(project_root=project_root, index_ref=index_ref)
+        initial_coverage = queue.coverage_summary()
+        triage_agent = self.sub_agents.get("triage")
+        bridge = AgentRuntimeBridge(
+            llm_service=getattr(triage_agent, "llm_service", None) or self.llm_service,
+            tools=getattr(triage_agent, "tools", {}) or self.tools,
+            spec=build_triage_runtime_spec(),
+            user_id=config.get("user_id"),
+        )
+        runtime_payload = self._build_triage_runtime_payload(
+            input_data=input_data,
+            recon_result=recon_result,
+            scan_result=scan_result,
+        )
+        project_id = str(input_data.get("project_id") or input_data.get("project_info", {}).get("id") or "unknown")
+        task_id = input_data.get("task_id")
+        max_turns = self._triage_runtime_turn_limit(config)
+        total_count = int(initial_coverage.get("total_count") or 0)
+        max_batches = max(1, (total_count + 4) // 5 + 5)
+        batch_runs: List[Dict[str, Any]] = []
+
+        await self.emit_event(
+            "phase_start",
+            "runtime triage",
+            metadata={"phase": "triage", "coverage": initial_coverage},
+        )
+        for batch_number in range(1, max_batches + 1):
+            if self.is_cancelled:
+                raise asyncio.CancelledError("Task cancelled during runtime triage.")
+            coverage = queue.coverage_summary()
+            if coverage.get("is_complete"):
+                break
+            await self.emit_event(
+                "thinking",
+                f"Runtime triage batch {batch_number} starting.",
+                metadata={"agent": "triage", "batch_number": batch_number, "coverage": coverage},
+            )
+            batch_result = await bridge.run(
+                project_id=project_id,
+                task_id=task_id,
+                system_prompt=TRIAGE_RUNTIME_SYSTEM_PROMPT,
+                recon_payload=runtime_payload,
+                user_message=(
+                    "Process exactly one triage batch now. Call GetTriageBatch with batch_size=5, "
+                    "call GetScanFinding for every returned finding_id, inspect source context with Read/Grep/Glob, "
+                    "then call FinalizeTriageBatch covering every finding_id in that batch."
+                ),
+                max_turns=max_turns,
+            )
+            batch_runs.append(
+                {
+                    "batch_number": batch_number,
+                    "session_id": batch_result.get("session_id"),
+                    "final_payload": batch_result.get("final_payload"),
+                    "turn_count": batch_result.get("turn_count"),
+                    "tool_call_count": batch_result.get("tool_call_count"),
+                }
+            )
+        else:
+            coverage = queue.coverage_summary()
+            if not coverage.get("is_complete"):
+                return AgentResult(
+                    success=False,
+                    error="Runtime triage did not complete all scan findings within the batch limit.",
+                    data={"findings": [], "coverage": coverage, "batch_runs": batch_runs},
+                    metadata={"runtime_stack": "runtime"},
+                )
+
+        final_result = await bridge.run(
+            project_id=project_id,
+            task_id=task_id,
+            system_prompt=TRIAGE_RUNTIME_SYSTEM_PROMPT,
+            recon_payload=runtime_payload,
+            user_message=(
+                "All queued scan findings have been processed. Call FinalizeTriage now to return the final "
+                "triage findings and summary. Do not claim another batch."
+            ),
+            max_turns=max(3, min(max_turns, 6)),
+        )
+        final_payload = final_result.get("final_payload") if isinstance(final_result, dict) else {}
+        triage_data = dict(final_payload or {})
+        triage_data.setdefault("findings", [])
+        triage_data.setdefault("summary", "Runtime triage completed.")
+        triage_data["batch_runs"] = batch_runs
+        triage_data["final_session_id"] = final_result.get("session_id")
+        triage_data["coverage"] = triage_data.get("coverage") or queue.coverage_summary()
+        handoff = self._build_triage_handoff(triage_data)
+        result = AgentResult(
+            success=True,
+            data=triage_data,
+            metadata={"runtime_stack": "runtime", "batch_count": len(batch_runs)},
+            handoff=handoff,
+        )
+        self._agent_results["triage"] = result.to_dict()
+        if handoff:
+            self._agent_handoffs["triage"] = handoff
+        await self.emit_event(
+            "phase_complete",
+            "runtime triage completed",
+            metadata={"phase": "triage", "coverage": triage_data.get("coverage"), "findings": len(triage_data.get("findings", []))},
+        )
         return result
 
     def _normalize_finding(self, finding: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -463,23 +758,43 @@ class OrchestratorAgent(BaseAgent):
                 await self.emit_event("thinking", "Skipping finding: disabled in workflow config.", metadata={"agent": "finding", "skipped": True})
 
             if workflow_state["effective_agents"]["scan"]:
-                scan_result = await self._run_sub_agent("scan", scan_payload)
+                scan_result = await self._run_scan_pipeline(
+                    input_data=input_data,
+                    recon_result=recon_result,
+                    config=config,
+                )
             else:
                 scan_result = self._build_skipped_result("scan", "Scan agent disabled in workflow config.", output_key="raw_findings")
                 await self.emit_event("thinking", "Skipping scan: disabled in workflow config.", metadata={"agent": "scan", "skipped": True})
 
             if workflow_state["effective_agents"]["triage"]:
-                triage_payload = {
-                    **input_data,
-                    "previous_results": {
-                        "recon": recon_result.to_dict(),
-                        "scan": scan_result.to_dict(),
-                    },
-                    "task": "triage scanner output",
-                    "task_context": "Filter false positives and enrich scanner findings.",
-                    "handoff": scan_result.handoff.to_dict() if scan_result.handoff else None,
-                }
-                triage_result = await self._run_sub_agent("triage", triage_payload)
+                triage_result = await self._run_runtime_triage(
+                    input_data=input_data,
+                    recon_result=recon_result,
+                    scan_result=scan_result,
+                    config=config,
+                )
+                if not triage_result.success:
+                    error = triage_result.error or "Runtime triage failed before producing finalized findings."
+                    await self.emit_event(
+                        "phase_failed",
+                        "analysis failed",
+                        metadata={"phase": "analysis", "agent": "triage", "error": error},
+                    )
+                    return AgentResult(
+                        success=False,
+                        error=error,
+                        data={
+                            "phases": {
+                                "recon": recon_result.to_dict(),
+                                "scan": scan_result.to_dict(),
+                                "triage": triage_result.to_dict(),
+                            },
+                            "workflow": workflow_state,
+                            "findings": [],
+                            "summary": {"error": error},
+                        },
+                    )
             else:
                 triage_reason = (
                     "Triage agent disabled in workflow config."
@@ -534,7 +849,11 @@ class OrchestratorAgent(BaseAgent):
             }
             summary = {
                 "recon_mode": plan.recon_mode,
-                "scan_candidates": len(scan_result.data.get("raw_findings", [])) if scan_result.success and isinstance(scan_result.data, dict) else 0,
+                "scan_candidates": (
+                    int((scan_result.data.get("summary") or {}).get("total_candidates") or 0)
+                    if scan_result.success and isinstance(scan_result.data, dict) and isinstance(scan_result.data.get("summary"), dict)
+                    else len(scan_result.data.get("raw_findings", [])) if scan_result.success and isinstance(scan_result.data, dict) else 0
+                ),
                 "triaged_findings": len(triage_findings),
                 "direct_findings": len(direct_findings),
                 "merged_findings": len(merged_findings),

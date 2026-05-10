@@ -289,7 +289,7 @@ async def list_managed_local_directories(
     directories = [
         ManagedLocalDirectoryResponse(name=entry.name, path=str(entry.resolve()))
         for entry in sorted(managed_root.iterdir(), key=lambda item: item.name.lower())
-        if entry.is_dir()
+        if entry.is_dir() and entry.name != ".auditai_workspaces"
     ]
     return directories
 
