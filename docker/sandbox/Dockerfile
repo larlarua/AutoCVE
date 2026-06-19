@@ -26,6 +26,7 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
     ca-certificates \
     git \
     unzip \
+    xz-utils \
     jq \
     php-cli \
     openjdk-17-jdk-headless \
@@ -41,9 +42,15 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
 # 安装 Node.js (用于 JavaScript/TypeScript 代码执行 和 npm audit)
 # 使用 Node.js binary tarball，优先国内镜像并回退官方源
 ARG NODE_VERSION=20.20.2
+ARG TARGETARCH
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
+    case "${TARGETARCH}" in \
+      amd64) NODE_ARCH="x64" ;; \
+      arm64) NODE_ARCH="arm64" ;; \
+      *) echo "Unsupported Node.js architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
     for base_url in "https://npmmirror.com/mirrors/node" "https://nodejs.org/dist"; do \
-      curl -fsSL --retry 5 --retry-delay 3 --connect-timeout 30 "${base_url}/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz && break; \
+      curl -fsSL --retry 5 --retry-delay 3 --connect-timeout 30 "${base_url}/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" -o /tmp/node.tar.xz && break; \
     done && \
     test -s /tmp/node.tar.xz && \
     tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 && \
@@ -56,7 +63,12 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
 ENV PATH=$PATH:/usr/local/go/bin
 ENV GOPROXY=https://goproxy.cn,direct
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
-    curl -L https://mirrors.aliyun.com/golang/go1.21.6.linux-amd64.tar.gz -o go.tar.gz && \
+    case "${TARGETARCH}" in \
+      amd64) GO_ARCH="amd64" ;; \
+      arm64) GO_ARCH="arm64" ;; \
+      *) echo "Unsupported Go architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    curl -L "https://mirrors.aliyun.com/golang/go1.21.6.linux-${GO_ARCH}.tar.gz" -o go.tar.gz && \
     tar -C /usr/local -xzf go.tar.gz && \
     rm go.tar.gz
 
@@ -86,7 +98,12 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
 
 # 安装 Gitleaks
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
-    curl -L https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz -o gitleaks.tar.gz && \
+    case "${TARGETARCH}" in \
+      amd64) GITLEAKS_ARCH="x64" ;; \
+      arm64) GITLEAKS_ARCH="arm64" ;; \
+      *) echo "Unsupported Gitleaks architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    curl -L "https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_${GITLEAKS_ARCH}.tar.gz" -o gitleaks.tar.gz && \
     tar -xzf gitleaks.tar.gz && \
     mv gitleaks /usr/local/bin/ && \
     rm gitleaks.tar.gz
@@ -97,7 +114,12 @@ RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
 
 # 安装 OSV-Scanner
 RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && \
-    curl -L https://github.com/google/osv-scanner/releases/download/v1.6.2/osv-scanner_1.6.2_linux_amd64 -o /usr/local/bin/osv-scanner && \
+    case "${TARGETARCH}" in \
+      amd64) OSV_ARCH="amd64" ;; \
+      arm64) OSV_ARCH="arm64" ;; \
+      *) echo "Unsupported OSV-Scanner architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    curl -L "https://github.com/google/osv-scanner/releases/download/v1.6.2/osv-scanner_1.6.2_linux_${OSV_ARCH}" -o /usr/local/bin/osv-scanner && \
     chmod +x /usr/local/bin/osv-scanner
 
 # 创建非 root 用户
