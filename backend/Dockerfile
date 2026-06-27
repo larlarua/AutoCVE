@@ -21,7 +21,8 @@ COPY pyproject.toml requirements-lock.txt README.md ./
 RUN python -m venv /app/.venv     && /app/.venv/bin/pip install --upgrade pip setuptools wheel     && /app/.venv/bin/pip install --retries 5 -r requirements-lock.txt     && /app/.venv/bin/pip install --retries 5 "psycopg[binary]>=3.2.1"
 
 COPY . .
-RUN /app/.venv/bin/pip install --no-deps -e .
+RUN /app/.venv/bin/pip install --no-deps -e . \
+    && /app/.venv/bin/python -m arq --help >/dev/null
 
 FROM python:3.12-slim-bookworm AS runtime
 

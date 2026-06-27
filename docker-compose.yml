@@ -134,7 +134,7 @@ services:
       http_proxy: ''
       https_proxy: ''
       NO_PROXY: '*'
-    command: .venv/bin/arq app.worker.agent_worker.WorkerSettings
+    command: .venv/bin/python -m arq app.worker.agent_worker.WorkerSettings
     depends_on:
       backend:
         condition: service_healthy
@@ -186,7 +186,7 @@ services:
       http_proxy: ''
       https_proxy: ''
       NO_PROXY: '*'
-    command: .venv/bin/arq app.worker.one_click_cve_worker.WorkerSettings
+    command: .venv/bin/python -m arq app.worker.one_click_cve_worker.WorkerSettings
     depends_on:
       backend:
         condition: service_healthy
