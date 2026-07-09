@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, AsyncGenerator
+from collections.abc import AsyncGenerator
+from typing import Any
 
 import httpx
 
@@ -26,6 +27,12 @@ from ..types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _is_thinking_model(model: str) -> bool:
+    """Return True for models that use extended thinking and do not accept temperature or prefill."""
+    m = (model or "").lower()
+    return "opus-4-8" in m or "claude-3-7-sonnet" in m
 
 
 class AnthropicAdapter(BaseLLMAdapter):
@@ -197,6 +204,9 @@ class AnthropicAdapter(BaseLLMAdapter):
 
     def _build_payload(self, request: LLMRequest, *, stream: bool) -> dict[str, Any]:
         messages, system = self._normalize_messages([msg.to_dict() for msg in request.messages])
+        # Extended thinking models do not support assistant prefill (trailing assistant message)
+        if messages and messages[-1]["role"] == "assistant" and _is_thinking_model(self.config.model):
+            messages = messages[:-1]
         payload: dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
@@ -204,7 +214,8 @@ class AnthropicAdapter(BaseLLMAdapter):
             "stream": stream,
         }
         temperature = request.temperature if request.temperature is not None else self.config.temperature
-        if temperature is not None:
+        # Extended thinking models do not accept the temperature parameter
+        if temperature is not None and not _is_thinking_model(self.config.model):
             payload["temperature"] = temperature
         if system:
             payload["system"] = system

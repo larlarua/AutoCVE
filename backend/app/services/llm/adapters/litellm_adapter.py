@@ -222,9 +222,12 @@ class LiteLLMAdapter(BaseLLMAdapter):
         kwargs: Dict[str, Any] = {
             "model": self._litellm_model,
             "messages": messages,
-            "temperature": request.temperature if request.temperature is not None else self.config.temperature,
             "max_tokens": request.max_tokens if request.max_tokens is not None else self.config.max_tokens,
         }
+        # Extended thinking models (opus-4-8, claude-3-7-sonnet) do not accept the temperature parameter
+        _m = (self.config.model or "").lower()
+        if "opus-4-8" not in _m and "claude-3-7-sonnet" not in _m:
+            kwargs["temperature"] = request.temperature if request.temperature is not None else self.config.temperature
 
         # Claude 不允许同时传 temperature 和 top_p
         if self.config.provider != LLMProvider.CLAUDE:
