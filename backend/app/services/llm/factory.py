@@ -166,6 +166,8 @@ class LLMFactory:
                 "qwen-audio",
             ],
             LLMProvider.DEEPSEEK: [
+                "deepseek-v4",
+                "deepseek-flash",
                 "deepseek-v3.1-terminus",
                 "deepseek-r1-70b",
                 "deepseek-r1-zero",
