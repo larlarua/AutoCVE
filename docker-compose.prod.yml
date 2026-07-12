@@ -30,7 +30,7 @@ services:
       - autocve-network
 
   backend:
-    image: ghcr.io/larlarua/autocve-backend:v1.0.4
+    image: ghcr.io/larlarua/autocve-backend:v1.0.5
     restart: unless-stopped
     cpus: "1.0"
     mem_limit: 1g
@@ -54,7 +54,7 @@ services:
       - ONE_CLICK_CVE_EXECUTION_MODE=worker
       - ONE_CLICK_CVE_MAX_REPOSITORY_SIZE_KB=${ONE_CLICK_CVE_MAX_REPOSITORY_SIZE_KB:-512000}
       - SANDBOX_ENABLED=true
-      - SANDBOX_IMAGE=ghcr.io/larlarua/autocve-sandbox:v1.0.4
+      - SANDBOX_IMAGE=ghcr.io/larlarua/autocve-sandbox:v1.0.5
       - MANAGED_PROJECTS_ROOT=/workspace/projects
       - PROJECT_SOURCE_STORAGE_PATH=/app/uploads/project_sources
       - HOST_PROJECT_ROOT=${HOST_PROJECT_ROOT:-}
@@ -88,7 +88,7 @@ services:
       - autocve-network
 
   agent-worker:
-    image: ghcr.io/larlarua/autocve-backend:v1.0.4
+    image: ghcr.io/larlarua/autocve-backend:v1.0.5
     restart: unless-stopped
     cpus: "2.0"
     mem_limit: 4g
@@ -109,7 +109,7 @@ services:
       - AGENT_EVENT_STREAM_ENABLED=true
       - ONE_CLICK_CVE_EXECUTION_MODE=worker
       - SANDBOX_ENABLED=true
-      - SANDBOX_IMAGE=ghcr.io/larlarua/autocve-sandbox:v1.0.4
+      - SANDBOX_IMAGE=ghcr.io/larlarua/autocve-sandbox:v1.0.5
       - MANAGED_PROJECTS_ROOT=/workspace/projects
       - PROJECT_SOURCE_STORAGE_PATH=/app/uploads/project_sources
       - HOST_PROJECT_ROOT=${HOST_PROJECT_ROOT:-}
@@ -144,7 +144,7 @@ services:
       - autocve-network
 
   one-click-cve-worker:
-    image: ghcr.io/larlarua/autocve-backend:v1.0.4
+    image: ghcr.io/larlarua/autocve-backend:v1.0.5
     restart: unless-stopped
     cpus: "1.0"
     mem_limit: 2g
@@ -168,7 +168,7 @@ services:
       - AUDIT_SESSION_RESUME_TIMEOUT_SECONDS=${AUDIT_SESSION_RESUME_TIMEOUT_SECONDS:-3000}
       - ONE_CLICK_CVE_WORKER_MAX_TRIES=${ONE_CLICK_CVE_WORKER_MAX_TRIES:-1}
       - SANDBOX_ENABLED=true
-      - SANDBOX_IMAGE=ghcr.io/larlarua/autocve-sandbox:v1.0.4
+      - SANDBOX_IMAGE=ghcr.io/larlarua/autocve-sandbox:v1.0.5
       - MANAGED_PROJECTS_ROOT=/workspace/projects
       - PROJECT_SOURCE_STORAGE_PATH=/app/uploads/project_sources
       - HOST_PROJECT_ROOT=${HOST_PROJECT_ROOT:-}
@@ -203,7 +203,7 @@ services:
       - autocve-network
 
   db-migrate:
-    image: ghcr.io/larlarua/autocve-backend:v1.0.4
+    image: ghcr.io/larlarua/autocve-backend:v1.0.5
     restart: "no"
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/${POSTGRES_DB_NAME:-autocve}
@@ -215,7 +215,7 @@ services:
       - autocve-network
 
   frontend:
-    image: ghcr.io/larlarua/autocve-frontend:v1.0.4
+    image: ghcr.io/larlarua/autocve-frontend:v1.0.5
     restart: unless-stopped
     ports:
       - "3000:80"
@@ -231,7 +231,7 @@ services:
       - autocve-network
 
   sandbox-pull:
-    image: ghcr.io/larlarua/autocve-sandbox:v1.0.4
+    image: ghcr.io/larlarua/autocve-sandbox:v1.0.5
     restart: "no"
     command: echo "Sandbox image ready"
 
