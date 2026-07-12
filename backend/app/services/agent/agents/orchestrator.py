@@ -454,6 +454,13 @@ class OrchestratorAgent(BaseAgent):
         triage_data["batch_runs"] = batch_runs
         triage_data["final_session_id"] = final_result.get("session_id")
         triage_data["coverage"] = triage_data.get("coverage") or queue.coverage_summary()
+        if triage_data.get("requires_retry"):
+            return AgentResult(
+                success=False,
+                error="Runtime triage did not return a finalized payload.",
+                data=triage_data,
+                metadata={"runtime_stack": "runtime", "batch_count": len(batch_runs)},
+            )
         handoff = self._build_triage_handoff(triage_data)
         result = AgentResult(
             success=True,

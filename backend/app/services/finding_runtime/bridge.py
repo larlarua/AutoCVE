@@ -1,29 +1,31 @@
 from __future__ import annotations
 
-import json
 import inspect
+import json
 import re
-from typing import Any, AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable
+from typing import Any
 
 from app.db.session import get_sync_session_factory
 from app.services.agent.json_parser import AgentJsonParser
 from app.services.finding_runtime.adapters.finding import FindingRuntimeAdapter
+from app.services.finding_runtime.memory import RuntimeMemoryManager
 from app.services.finding_runtime.models import (
     RuntimeCompletionMode,
     RuntimeMessageRole,
     RuntimeModelResponse,
     RuntimeStopReason,
-    RuntimeTerminalAction,
     TranscriptItem,
     TurnExecutionResult,
 )
-from app.services.finding_runtime.memory import RuntimeMemoryManager
 from app.services.finding_runtime.runner import FindingRuntimeRunner
 from app.services.finding_runtime.session_store import AuditSessionStore
 from app.services.finding_runtime.skills import RuntimeSkillCatalog
-from app.services.finding_runtime.tools.finalize_finding import FinalizeFindingTool
-from app.services.finding_runtime.tools.finalize_vulnerability_reports import FinalizeVulnerabilityReportsTool
 from app.services.finding_runtime.tooling import ToolOrchestrator, ToolRegistry
+from app.services.finding_runtime.tools.finalize_finding import FinalizeFindingTool
+from app.services.finding_runtime.tools.finalize_vulnerability_reports import (
+    FinalizeVulnerabilityReportsTool,
+)
 from app.services.runtime_core import build_runtime_tool_registry
 from app.services.runtime_core.tool_message_codec import (
     ToolMessageFormat,
@@ -989,15 +991,6 @@ class FindingRuntimeBridge:
             RUNTIME_FINALIZATION_PROMPT
             + "\n如果仍需继续查看文件、验证调用链、补齐 source/sink/PoC/影响面，请继续调用工具，不要结束。"
         ]
-        return [
-            RUNTIME_FINALIZATION_PROMPT,
-            (
-                "现在请立即仅以严格 JSON 返回最终报告。"
-                "不要再请求任何工具。"
-                "响应必须是一个单独的 JSON 对象，顶层键只能是 findings 和 summary。"
-
-            ),
-        ]
 
     @classmethod
     def _default_fallback_payload(cls, snapshot: Any) -> dict[str, Any]:
@@ -1050,21 +1043,7 @@ class FindingRuntimeBridge:
                 )
             except ValueError:
                 completion_mode = None
-        if completion_mode in {RuntimeCompletionMode.FINALIZE_TOOL, RuntimeCompletionMode.INCOMPLETE}:
-            return False
-        terminal_action = getattr(runner_result, "terminal_action", None)
-        if terminal_action is None and isinstance(runner_result, dict):
-            terminal_action = runner_result.get("terminal_action")
-        if terminal_action is not None:
-            try:
-                terminal_action = (
-                    terminal_action
-                    if isinstance(terminal_action, RuntimeTerminalAction)
-                    else RuntimeTerminalAction(str(terminal_action))
-                )
-            except ValueError:
-                terminal_action = None
-        if terminal_action is RuntimeTerminalAction.NATURAL_END_WITHOUT_TERMINAL_ACTION:
+        if completion_mode == RuntimeCompletionMode.FINALIZE_TOOL:
             return False
         stop_reason = getattr(runner_result, "stop_reason", None)
         if stop_reason is None and isinstance(runner_result, dict):

@@ -186,6 +186,8 @@ httpx==0.28.1
     #   safety
 httpx-sse==0.4.3
     # via langchain-community
+socksio==1.0.0
+    # via httpx[socks]
 huggingface-hub==1.2.1
     # via tokenizers
 humanfriendly==10.0

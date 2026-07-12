@@ -73,7 +73,7 @@ export function BranchSelector({
         </Button>
       </PopoverTrigger>
       <PopoverContent
-        className="w-[--radix-popover-trigger-width] p-0 cyber-dialog border-border"
+        className="min-w-[280px] w-auto max-w-[400px] p-0 cyber-dialog border-border"
         align="start"
         onWheel={handleWheel}
       >

@@ -1,20 +1,26 @@
 # =============================================
-# AutoCVE v1.0.0 Docker Compose 开发者补充配置
+# AutoCVE Docker Compose 端口覆盖配置
 # =============================================
+# 使用高端口避免冲突
 # 部署: docker compose up -d
-# 注意: 仅用于开发者调试，生产环境请勿使用
 
 services:
-  # =============================================
-  # 开发者调试服务
-  # =============================================
+  db:
+    ports: !override
+      - "15432:5432"
+
+  redis:
+    ports: !override
+      - "16379:6379"
+
+  backend:
+    ports: !override
+      - "18000:8000"
+
+  frontend:
+    ports: !override
+      - "13000:80"
+
   adminer:
-    image: adminer:latest
-    restart: unless-stopped
-    ports:
-      - "8081:8080"
-    depends_on:
-      db:
-        condition: service_healthy
-    networks:
-      - autocve-network
+    ports: !override
+      - "18080:8080"

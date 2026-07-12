@@ -947,6 +947,7 @@ async def _generate_managed_report_bundle_from_session(
                 payload_extractor=report_service.extract_generation_payload_from_snapshot,
                 finalizer_prompts=[],
                 terminal_action_nudge_message=report_service.build_generation_terminal_nudge(),
+                fallback_payload_builder=lambda _: None,
             )
             bundle = continuation.get("final_payload")
             if bundle is None:

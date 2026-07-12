@@ -367,7 +367,7 @@ def test_agent_runtime_bridge_uses_finding_spec_without_changing_runner_contract
     assert "FinalizeFinding" in [tool["name"] for tool in bridge._build_tool_registry().describe_tools()]
 
 
-def test_bridge_does_not_attempt_finalizer_after_incomplete_terminal_action():
+def test_bridge_attempts_finalizer_after_incomplete_terminal_action():
     result = TurnExecutionResult(
         turn_id="turn-1",
         stop_reason=RuntimeStopReason.COMPLETED,
@@ -375,7 +375,7 @@ def test_bridge_does_not_attempt_finalizer_after_incomplete_terminal_action():
         completion_mode=RuntimeCompletionMode.INCOMPLETE,
     )
 
-    assert FindingRuntimeBridge._should_attempt_finalizer(result) is False
+    assert FindingRuntimeBridge._should_attempt_finalizer(result) is True
 
 
 def test_bridge_finalizer_prompt_does_not_force_empty_findings_for_incomplete_audit():

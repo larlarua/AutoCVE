@@ -54,6 +54,18 @@ def build_finding_runtime_spec() -> AgentRuntimeSpec:
     )
 
 
+def _triage_fallback_payload(_snapshot: Any) -> dict[str, Any]:
+    from app.services.finding_runtime.models import RuntimeCompletionMode
+
+    return {
+        "findings": [],
+        "summary": "Triage batch did not complete - FinalizeTriageBatch was not called.",
+        "runtime_completion_mode": RuntimeCompletionMode.INCOMPLETE.value,
+        "is_partial": True,
+        "requires_retry": True,
+    }
+
+
 def _extract_tool_final_payload(snapshot: Any) -> dict[str, Any] | None:
     for message in reversed(getattr(snapshot, "messages", []) or []):
         payload = getattr(message, "payload", {}) or {}
@@ -79,7 +91,7 @@ def build_triage_runtime_spec() -> AgentRuntimeSpec:
         terminal_action_nudge_limit=2,
         payload_extractor=_extract_tool_final_payload,
         finalizer_prompts=None,
-        fallback_payload_builder=None,
+        fallback_payload_builder=_triage_fallback_payload,
         finalizer_tool_factory=None,
         tool_registry_builder=build_runtime_tool_registry,
     )

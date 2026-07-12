@@ -170,14 +170,29 @@ async def fetch_file_content(url: str, headers: Dict[str, str] = None) -> Option
 
 
 async def get_github_branches(repo_url: str, token: str = None) -> List[str]:
-    """获取GitHub仓库分支列表"""
+    """获取GitHub仓库分支列表（支持分页）"""
     repo_info = parse_repository_url(repo_url, "github")
     owner, repo = repo_info['owner'], repo_info['repo']
-    
-    branches_url = f"https://api.github.com/repos/{owner}/{repo}/branches?per_page=100"
-    branches_data = await github_api(branches_url, token)
-    
-    return [b["name"] for b in branches_data]
+
+    all_branches = []
+    page = 1
+    per_page = 100
+
+    while True:
+        branches_url = f"https://api.github.com/repos/{owner}/{repo}/branches?per_page={per_page}&page={page}"
+        branches_data = await github_api(branches_url, token)
+
+        if not branches_data:
+            break
+
+        all_branches.extend([b["name"] for b in branches_data])
+
+        if len(branches_data) < per_page:
+            break
+
+        page += 1
+
+    return all_branches
 
 
 async def get_github_repository_metadata(repo_url: str, token: str = None) -> Dict[str, Any]:

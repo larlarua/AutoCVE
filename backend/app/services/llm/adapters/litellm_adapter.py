@@ -22,6 +22,7 @@ from ..types import (
     DEFAULT_BASE_URLS,
 )
 from ..prompt_cache import prompt_cache_manager, estimate_tokens
+from ..protocols.registry import get_model_capabilities
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +184,8 @@ class LiteLLMAdapter(BaseLLMAdapter):
         """Return only sampling parameters explicitly configured for this request."""
         sampling: Dict[str, float] = {}
         temperature = request.temperature if request.temperature is not None else self.config.temperature
-        if temperature is not None:
+        capabilities = get_model_capabilities(self.config.provider, self.config.model)
+        if temperature is not None and capabilities.get("supports_temperature", True):
             sampling["temperature"] = temperature
         top_p = request.top_p if request.top_p is not None else self.config.top_p
         if self.config.provider != LLMProvider.CLAUDE and top_p is not None:
