@@ -53,6 +53,7 @@ export function useAuditSessionChatStream({
   ) => Promise<AuditSessionStreamResult>;
 }) {
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isAutoCompacting, setIsAutoCompacting] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const streamingAssistantIdRef = useRef<string | null>(null);
@@ -106,6 +107,17 @@ export function useAuditSessionChatStream({
     }
 
     if (event.type === "heartbeat") {
+      return;
+    }
+
+    if (event.type === "context_compaction_started") {
+      setStreamError(null);
+      setIsAutoCompacting(true);
+      return;
+    }
+
+    if (event.type === "context_compacted" || event.type === "context_compaction_failed") {
+      setIsAutoCompacting(false);
       return;
     }
 
@@ -203,6 +215,7 @@ export function useAuditSessionChatStream({
     abortRef.current?.abort();
     abortRef.current = null;
     clearPlaceholders();
+    setIsAutoCompacting(false);
     setIsStreaming(false);
     void refresh({ silent: true });
   }, [clearPlaceholders, refresh]);
@@ -215,6 +228,7 @@ export function useAuditSessionChatStream({
     streamingAssistantIdRef.current = null;
     thinkingAssistantIdRef.current = null;
     setIsStreaming(true);
+    setIsAutoCompacting(false);
     setStreamError(null);
 
     try {
@@ -232,6 +246,7 @@ export function useAuditSessionChatStream({
       throw error;
     } finally {
       setIsStreaming(false);
+      setIsAutoCompacting(false);
       abortRef.current = null;
     }
   }, [handleEvent, refresh]);
@@ -261,6 +276,7 @@ export function useAuditSessionChatStream({
 
   return {
     isStreaming,
+    isAutoCompacting,
     streamError,
     runStreamRequest,
     sendMessage,

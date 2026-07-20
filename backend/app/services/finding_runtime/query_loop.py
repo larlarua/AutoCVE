@@ -120,16 +120,32 @@ class QueryLoop:
         prepared_messages = apply_history_snip(prepared_messages, state)
         prepared_messages = apply_microcompact(prepared_messages, state)
         prepared_messages, state = apply_context_collapse_if_needed(prepared_messages, state)
+        effective_system_prompt = append_system_context(snapshot.session.system_prompt, runtime_state)
+        prepared_messages = prepend_user_context(prepared_messages, runtime_state)
+        prepared_messages = normalize_messages_for_model(prepared_messages)
         auto_compact_decision = auto_compact_if_needed(
             prepared_messages,
             state,
             tracking=self._extract_auto_compact_tracking(state),
+            model=model_name,
+            system_prompt=effective_system_prompt,
+            tool_definitions=tool_definitions,
             compactor=lambda messages, state, **kwargs: compact_conversation(
                 messages,
                 state,
                 model_client=self._model_client,
                 **kwargs,
             ),
+            on_compaction_start=lambda details: self._emit_event({
+                "type": "context_compaction_started",
+                "message_text": "正在自动压缩上下文，以继续本轮审计。",
+                **details,
+            }),
+            on_compaction_error=lambda details: self._emit_event({
+                "type": "context_compaction_failed",
+                "message_text": "自动压缩上下文未完成，将保留原上下文并继续恢复流程。",
+                **details,
+            }),
         )
         if inspect.isawaitable(auto_compact_decision):
             auto_compact_decision = await auto_compact_decision
@@ -138,10 +154,30 @@ class QueryLoop:
             prepared_messages=prepared_messages,
             decision=auto_compact_decision,
         )
-        effective_system_prompt = append_system_context(snapshot.session.system_prompt, runtime_state)
-        prepared_messages = prepend_user_context(prepared_messages, runtime_state)
+        # The compact boundary is persisted for recovery, but it is an
+        # internal state marker and must never be sent to the model.
         prepared_messages = normalize_messages_for_model(prepared_messages)
-        blocking_limit = evaluate_blocking_limit(prepared_messages, state)
+        if getattr(auto_compact_decision, "was_compacted", False):
+            self._persist_auto_compaction(
+                session_id=session_id,
+                turn_id=turn_id,
+                state=state,
+                decision=auto_compact_decision,
+            )
+            await self._emit_event({
+                "type": "context_compacted",
+                "message_text": "上下文已自动压缩，正在继续审计。",
+                "pre_tokens": getattr(auto_compact_decision.compaction_result, "pre_compact_token_count", None),
+                "post_tokens": getattr(auto_compact_decision.compaction_result, "post_compact_token_count", None),
+                "threshold_tokens": auto_compact_decision.compaction_result.boundary_marker.metadata.get("auto_compact_threshold"),
+            })
+        blocking_limit = evaluate_blocking_limit(
+            prepared_messages,
+            state,
+            model=model_name,
+            system_prompt=effective_system_prompt,
+            tool_definitions=tool_definitions,
+        )
         if blocking_limit.get("blocked"):
             return self._finalize_terminal_result(
                 session_id=session_id,
@@ -153,8 +189,9 @@ class QueryLoop:
                 checkpoint_extra={
                     "phase": "blocking_limit_preflight",
                     "blocking_limit": {
-                        "current_chars": int(blocking_limit.get("current_chars") or 0),
-                        "max_chars": int(blocking_limit.get("max_chars") or 0),
+                        "token_usage": int(blocking_limit.get("token_usage") or 0),
+                        "max_tokens": int(blocking_limit.get("blocking_limit") or 0),
+                        "token_budget_source": str(blocking_limit.get("token_budget_source") or ""),
                     },
                 },
             )
@@ -810,6 +847,29 @@ class QueryLoop:
             final_payload=final_payload,
         )
 
+    def _persist_auto_compaction(self, *, session_id: str, turn_id: str, state: QueryLoopState, decision) -> None:
+        """Make a successful pre-turn compaction resumable before the main model call."""
+        result = decision.compaction_result
+        self._session_store.save_query_loop_state(session_id, state)
+        self._session_store.create_checkpoint(
+            session_id=session_id,
+            turn_id=turn_id,
+            checkpoint_type=AuditCheckpointType.AUTO,
+            state_payload={
+                "kind": "context_compaction",
+                "checkpoint_kind": "context_compaction",
+                "strategy": "auto_compact",
+                "pre_tokens": getattr(result, "pre_compact_token_count", None),
+                "post_tokens": getattr(result, "post_compact_token_count", None),
+                "threshold_tokens": result.boundary_marker.metadata.get("auto_compact_threshold"),
+                "context_window_tokens": result.boundary_marker.metadata.get("context_window_tokens"),
+                "token_budget_source": result.boundary_marker.metadata.get("token_budget_source"),
+                "messages_summarized": result.summary_messages[-1].metadata.get("messages_summarized") if result.summary_messages else 0,
+                "compacted_query_loop_state": state.to_payload(),
+                "resumable": True,
+            },
+        )
+
     @staticmethod
     def _extract_auto_compact_tracking(state: QueryLoopState) -> AutoCompactTrackingState | None:
         tracking = dict(state.auto_compact_tracking or {})
@@ -848,7 +908,7 @@ class QueryLoop:
                 "boundary_name": result.boundary_marker.name,
                 "summary_message_name": result.summary_messages[-1].name if result.summary_messages else None,
             })
-            for key in ("auto_compact_threshold", "effective_context_window"):
+            for key in ("auto_compact_threshold", "context_window_tokens", "token_budget_source"):
                 if result.boundary_marker.metadata.get(key) is not None:
                     tracking[key] = result.boundary_marker.metadata.get(key)
         return next_messages, QueryLoopState(

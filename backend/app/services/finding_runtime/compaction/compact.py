@@ -8,8 +8,10 @@ from typing import Any, Iterable, Literal
 from app.services.finding_runtime.compaction.models import AutoCompactTrackingState, CompactionResult
 from app.services.finding_runtime.compaction.post_compact import rebuild_post_compact_artifacts
 from app.services.finding_runtime.compaction.prompts import build_compaction_prompt, get_compact_user_summary_message
+from app.services.finding_runtime.compaction.token_budget import estimate_transcript_tokens
 from app.services.finding_runtime.models import RuntimeMessageRole, RuntimeModelResponse, TranscriptItem
 from app.services.finding_runtime.query_state import QueryLoopState
+from app.services.llm.tokenizer import TokenEstimator
 
 MAX_PTL_RETRIES = 3
 PTL_RETRY_MARKER = "[earlier conversation truncated for compaction retry]"
@@ -28,8 +30,11 @@ async def compact_conversation(
     token_usage: int,
     auto_compact_threshold: int,
     model_client=None,
+    context_window_tokens: int | None = None,
+    token_budget_source: str | None = None,
 ) -> CompactionResult:
-    config = dict(state.tool_use_context.get("autocompact") or {})
+    pipeline = dict(state.tool_use_context.get("query_context_pipeline") or {})
+    config = dict(pipeline.get("autocompact") or state.tool_use_context.get("autocompact") or {})
     preserve_tail_messages = max(0, int(config.get("preserve_tail_messages") or 0))
     custom_instructions = str(state.tool_use_context.get("compact_instructions") or "").strip() or None
     transcript_path = str(state.tool_use_context.get("transcript_path") or "").strip() or None
@@ -60,6 +65,8 @@ async def compact_conversation(
             "strategy": "auto_compact",
             "pre_compact_token_count": pre_compact_token_count,
             "auto_compact_threshold": auto_compact_threshold,
+            "context_window_tokens": context_window_tokens,
+            "token_budget_source": token_budget_source,
             "turn_id": tracking.turn_id if tracking is not None else None,
             "recompaction_in_chain": bool(tracking.compacted) if tracking is not None else False,
         },
@@ -86,9 +93,9 @@ async def compact_conversation(
         state=state,
         messages_to_keep=messages_to_keep,
     )
-    true_post_compact_token_count = sum(
-        len(item.content or "")
-        for item in [annotated_boundary, summary_message, *messages_to_keep, *attachments, *hook_results]
+    true_post_compact_token_count = estimate_transcript_tokens(
+        transcript=[annotated_boundary, summary_message, *messages_to_keep, *attachments, *hook_results],
+        model=model,
     )
     return CompactionResult(
         boundary_marker=annotated_boundary,
@@ -100,7 +107,10 @@ async def compact_conversation(
         pre_compact_token_count=pre_compact_token_count,
         post_compact_token_count=true_post_compact_token_count,
         true_post_compact_token_count=true_post_compact_token_count,
-        compaction_usage=compaction_usage or {"input_tokens": pre_compact_token_count, "output_tokens": len(summary_message.content or "")},
+        compaction_usage=compaction_usage or {
+            "input_tokens": pre_compact_token_count,
+            "output_tokens": TokenEstimator.count_tokens(summary_message.content or "", model),
+        },
     )
 
 
@@ -149,7 +159,7 @@ async def partial_compact_conversation(
         fallback_summary=_build_summary_from_messages(messages_to_summarize),
     )
 
-    pre_compact_token_count = sum(len(item.content or "") for item in all_messages)
+    pre_compact_token_count = estimate_transcript_tokens(transcript=all_messages, model=model)
     boundary_marker = TranscriptItem(
         role=RuntimeMessageRole.SYSTEM,
         content="Reactive compact boundary." if strategy == "reactive_compact" else "Partial compact boundary.",
@@ -198,7 +208,7 @@ async def partial_compact_conversation(
         messages_to_keep=messages_to_keep,
     )
     post_messages = [annotated_boundary, summary_message, *messages_to_keep, *attachments, *hook_results]
-    true_post_compact_token_count = sum(len(item.content or "") for item in post_messages)
+    true_post_compact_token_count = estimate_transcript_tokens(transcript=post_messages, model=model)
     return CompactionResult(
         boundary_marker=annotated_boundary,
         summary_messages=[summary_message],
@@ -333,7 +343,10 @@ async def _summarize_messages(
             )
         )
         model_response = _normalize_model_response(response)
-        compaction_usage = {"output_tokens": len(model_response.content or ""), "ptl_attempts": ptl_attempts}
+        compaction_usage = {
+            "output_tokens": TokenEstimator.count_tokens(model_response.content or "", model),
+            "ptl_attempts": ptl_attempts,
+        }
         if model_response.recoverable_error_kind != "prompt_too_long":
             summary = model_response.content or summary
             break

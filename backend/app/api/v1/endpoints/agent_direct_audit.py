@@ -365,6 +365,7 @@ async def _ensure_direct_audit_outputs(
     sandbox_manager: SandboxManager | None = None,
     model_name: str | None = None,
     max_turns: int | None = None,
+    generate_reports: bool = True,
 ) -> dict[str, Any]:
     owns_follow_up_context = bridge is None or sandbox_manager is None or model_name is None or max_turns is None
     if owns_follow_up_context:
@@ -401,7 +402,7 @@ async def _ensure_direct_audit_outputs(
             report_bundle = _extract_direct_audit_report_bundle(messages, report_service=report_service)
 
         primary_finding = _select_primary_direct_audit_finding(final_payload)
-        if report_bundle is None and primary_finding is not None:
+        if generate_reports and report_bundle is None and primary_finding is not None:
             transient_vulnerability = _build_direct_audit_transient_vulnerability(
                 session=session,
                 project=project,
@@ -715,6 +716,7 @@ async def start_direct_audit_session(
     guardrails_enabled: bool,
     db: AsyncSession,
     current_user: User,
+    generate_reports: bool = True,
 ) -> AuditSession:
     bridge, sandbox_manager, model_name, max_turns, system_prompt, recon_payload = await _build_direct_runtime_context(
         project=project,
@@ -757,6 +759,7 @@ async def start_direct_audit_session(
                 sandbox_manager=sandbox_manager,
                 model_name=model_name,
                 max_turns=max_turns,
+                generate_reports=generate_reports,
             )
     finally:
         try:

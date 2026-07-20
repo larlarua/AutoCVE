@@ -6,13 +6,15 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.api import deps
 from app.api.v1.endpoints import audit_sessions as audit_sessions_endpoint
 from app.api.v1.endpoints.audit_sessions import router as audit_sessions_router
 from app.db.base import Base
-from app.models.audit_session import AuditHandoff, AuditMemory, AuditSession, AuditSessionMessage, AuditSkill, AuditSkillInvocation, AuditToolCall
+from app.models.audit_session import AuditCheckpoint, AuditHandoff, AuditMemory, AuditSession, AuditSessionMessage, AuditSkill, AuditSkillInvocation, AuditToolCall
+from app.services.finding_runtime.models import RuntimeStopReason, TurnExecutionResult
 
 
 def build_test_app() -> FastAPI:
@@ -491,17 +493,23 @@ async def test_stream_follow_up_message_for_runtime_session_uses_audit_chat_runt
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }})
             await event_sink({"type": "token", "content": "Runtime", "accumulated": "Runtime"})
-        db.add(
-            AuditSessionMessage(
-                session_id=session_id,
-                sequence=2,
-                role="assistant",
-                content="Runtime loop persisted the real follow-up response.",
-                message_metadata={"kind": "runtime_follow_up_response"},
-                payload={"continued": True},
-            )
+            await event_sink({"type": "done", "message": {"id": "internal-done"}})
+        assistant_message = AuditSessionMessage(
+            session_id=session_id,
+            sequence=2,
+            role="assistant",
+            content="Runtime loop persisted the real follow-up response.",
+            message_metadata={"kind": "runtime_follow_up_response"},
+            payload={"continued": True},
         )
+        db.add(assistant_message)
         await db.commit()
+        await db.refresh(assistant_message)
+        return {"runner_result": TurnExecutionResult(
+            turn_id="turn-1",
+            stop_reason=RuntimeStopReason.COMPLETED,
+            assistant_message_id=assistant_message.id,
+        )}
 
     async def fail_build_follow_up_llm_service(*, session, db):
         raise AssertionError("streaming follow-up path should not build a direct LLM follow-up service for runtime sessions")
@@ -528,9 +536,82 @@ async def test_stream_follow_up_message_for_runtime_session_uses_audit_chat_runt
     assert response.text.index('"type": "user_message"') < response.text.index('"type": "assistant_start"')
     assert '"type": "token"' in response.text
     assert '"type": "done"' in response.text
+    assert "internal-done" not in response.text
     assert len(messages.json()) == 2
     assert messages.json()[0]["metadata"]["kind"] == "follow_up_user_message"
     assert messages.json()[1]["metadata"]["kind"] == "runtime_follow_up_response"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop_reason", "error_kind"),
+    [
+        (RuntimeStopReason.BLOCKING_LIMIT, "blocking_limit"),
+        (RuntimeStopReason.MAX_TURNS, "max_turns"),
+        (RuntimeStopReason.TOOL_TIMEOUT, "tool_timeout"),
+        (RuntimeStopReason.ABORTED_STREAMING, "cancelled"),
+        (RuntimeStopReason.ABORTED_TOOLS, "cancelled"),
+    ],
+)
+async def test_stream_runtime_follow_up_persists_terminal_failures_and_never_sends_done(monkeypatch, stop_reason, error_kind):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        session = AuditSession(project_id="project-1", task_id="task-1", runtime_stack="runtime", state="completed")
+        db.add(session)
+        await db.commit()
+        session_id = session.id
+
+    app = build_test_app()
+
+    async def override_get_db():
+        async with session_factory() as db:
+            yield db
+
+    async def override_get_current_user():
+        return SimpleNamespace(id="user-1", is_active=True)
+
+    async def fake_continue_audit_chat_session(*, session_id: str, content: str, db, event_sink=None):
+        if event_sink is not None:
+            await event_sink({"type": "error", "message": "internal error must not terminate SSE"})
+            await event_sink({"type": "done", "message": {"id": "internal-done"}})
+        return {"runner_result": TurnExecutionResult(turn_id="", stop_reason=stop_reason)}
+
+    monkeypatch.setattr(audit_sessions_endpoint, "continue_audit_chat_session", fake_continue_audit_chat_session, raising=False)
+    app.dependency_overrides[deps.get_db] = override_get_db
+    app.dependency_overrides[deps.get_current_user] = override_get_current_user
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            f"/api/v1/audit-sessions/{session_id}/messages/stream",
+            json={"content": "please continue the audit"},
+            headers={"Accept": "text/event-stream"},
+        )
+
+    async with session_factory() as db:
+        persisted_session = await db.get(AuditSession, session_id)
+        checkpoint = (await db.execute(
+            select(AuditCheckpoint)
+            .where(AuditCheckpoint.session_id == session_id)
+            .order_by(AuditCheckpoint.created_at.desc())
+        )).scalars().first()
+
+    await engine.dispose()
+
+    assert response.status_code == 200
+    assert '"type": "error"' in response.text
+    assert '"type": "done"' not in response.text
+    assert f'"error_kind": "{error_kind}"' in response.text
+    assert "internal-done" not in response.text
+    assert persisted_session.state == "failed"
+    assert persisted_session.runtime_state_json["resume_job"]["can_resume"] is True
+    assert checkpoint.state_payload["checkpoint_kind"] == "resumable_failed"
+    assert checkpoint.state_payload["error_kind"] == error_kind
 
 
 @pytest.mark.asyncio

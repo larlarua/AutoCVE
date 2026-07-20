@@ -215,6 +215,7 @@ export function SessionWorkspace({
   messages,
   loading,
   timelineStreaming,
+  timelineAutoCompacting,
   timelineError,
   timelineStreamingAssistantId,
   sessionFailed,
@@ -244,6 +245,7 @@ export function SessionWorkspace({
   messages: AuditSessionMessage[];
   loading: boolean;
   timelineStreaming: boolean;
+  timelineAutoCompacting: boolean;
   timelineError: string | null;
   timelineStreamingAssistantId: string | null;
   sessionFailed: boolean;
@@ -311,6 +313,7 @@ export function SessionWorkspace({
         <AuditTimeline
           messages={messages}
           isStreaming={timelineStreaming}
+          isAutoCompacting={timelineAutoCompacting}
           streamError={timelineError}
           onStopStreaming={onStopTimelineStreaming}
           activeStreamingMessageId={timelineStreamingAssistantId}

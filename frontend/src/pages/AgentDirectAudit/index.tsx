@@ -80,6 +80,7 @@ export default function AgentDirectAuditPage() {
   const [filePreviewError, setFilePreviewError] = useState<string | null>(null);
   const [starterPrompt, setStarterPrompt] = useState("");
   const [creatingSession, setCreatingSession] = useState(false);
+  const [createAutoCompacting, setCreateAutoCompacting] = useState(false);
   const [createStreamError, setCreateStreamError] = useState<string | null>(null);
   const [managedVulnerabilities, setManagedVulnerabilities] = useState<ManagedVulnerability[]>([]);
   const [managedVulnerabilitiesLoading, setManagedVulnerabilitiesLoading] = useState(false);
@@ -97,7 +98,7 @@ export default function AgentDirectAuditPage() {
   const sessionIds = projectSessions[selectedProjectId] || [];
 
   const { session, messages, setMessages, loading, error, refresh } = useAuditSession(selectedSessionId || undefined);
-  const { isStreaming, streamError, sendMessage, stopStreaming, streamingAssistantId } = useAuditSessionChatStream({
+  const { isStreaming, isAutoCompacting, streamError, sendMessage, stopStreaming, streamingAssistantId } = useAuditSessionChatStream({
     sessionId: selectedSessionId || undefined,
     setMessages,
     refresh,
@@ -122,6 +123,7 @@ export default function AgentDirectAuditPage() {
         ? "同步中..."
         : "同步报告";
   const timelineStreaming = creatingSession || isStreaming;
+  const timelineAutoCompacting = createAutoCompacting || isAutoCompacting;
   const timelineError = createStreamError || streamError || error;
   const timelineStreamingAssistantId = createStreamingAssistantIdRef.current || streamingAssistantId;
   const sessionFailed = session?.state === "failed";
@@ -531,6 +533,7 @@ export default function AgentDirectAuditPage() {
     createAbortRef.current = new AbortController();
     createStreamingAssistantIdRef.current = null;
     setCreateStreamError(null);
+    setCreateAutoCompacting(false);
     setCreatingSession(true);
 
     try {
@@ -602,6 +605,17 @@ export default function AgentDirectAuditPage() {
               return;
             }
 
+            if (event.type === "context_compaction_started") {
+              setCreateStreamError(null);
+              setCreateAutoCompacting(true);
+              return;
+            }
+
+            if (event.type === "context_compacted" || event.type === "context_compaction_failed") {
+              setCreateAutoCompacting(false);
+              return;
+            }
+
             if (event.type === "done" && event.message) {
               setCreateStreamError(null);
               setMessages((previous) => {
@@ -639,6 +653,7 @@ export default function AgentDirectAuditPage() {
       }
     } finally {
       setCreatingSession(false);
+      setCreateAutoCompacting(false);
       createAbortRef.current = null;
     }
   }
@@ -745,6 +760,7 @@ export default function AgentDirectAuditPage() {
           messages={messages}
           loading={loading}
           timelineStreaming={timelineStreaming}
+          timelineAutoCompacting={timelineAutoCompacting}
           timelineError={timelineError}
           timelineStreamingAssistantId={timelineStreamingAssistantId}
           sessionFailed={sessionFailed}

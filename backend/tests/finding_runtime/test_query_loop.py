@@ -844,9 +844,10 @@ def test_query_loop_runs_pre_model_pipeline_in_restored_order(monkeypatch):
         "history_snip",
         "microcompact",
         "context_collapse",
-        "autocompact",
         "append_system_context",
         "prepend_user_context",
+        "normalize_messages",
+        "autocompact",
         "normalize_messages",
     ]
 
@@ -1642,18 +1643,26 @@ def test_query_loop_persists_hook_execution_artifacts_for_teammate_idle_stop():
     assert artifact_messages[4].payload["hook_infos"][0]["durationMs"] == 42
 
 
-def test_query_loop_returns_blocking_limit_before_model_call_when_restored_controller_limit_exceeded():
+def test_query_loop_returns_blocking_limit_before_model_call_when_compaction_is_unavailable(monkeypatch):
     store = build_store()
     session_id = store.create_session(project_id="project-1", system_prompt="system")
-    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="A" * 17000))
+    store.append_message(session_id, TranscriptItem(role=RuntimeMessageRole.USER, content="A" * 8000))
     runtime_state = store.load_runtime_state(session_id)
     runtime_state.metadata["query_context"] = {
         "pipeline": {
             "autocompact": {"preserve_tail_messages": 999},
-            "autocompact_controller": {"context_window": 20000, "max_output_tokens": 40}
+            "autocompact_controller": {"context_window": 1000, "max_output_tokens": 40}
         }
     }
     store.replace_runtime_state(session_id, runtime_state)
+    monkeypatch.setattr(
+        "app.services.finding_runtime.query_loop.auto_compact_if_needed",
+        lambda messages, state, **kwargs: type(
+            "Decision",
+            (),
+            {"was_compacted": False, "consecutive_failures": 3, "compaction_result": None},
+        )(),
+    )
     client = FakeModelClient(responses=[{"content": "should not run", "stop_reason": RuntimeStopReason.COMPLETED.value}])
     loop = QueryLoop(session_store=store, model_client=client, tool_registry=ToolRegistry(), tool_orchestrator=None)
 
@@ -1696,6 +1705,14 @@ def test_query_loop_uses_auto_compact_orchestrator_output_as_model_transcript(mo
     assert client.calls[0]["transcript"][-1].content == "tail"
     assert saved_state.messages[0].name == "auto_compact_boundary"
     assert saved_state.messages[1].name == "auto_compact_summary"
+    checkpoint_payload = next(
+        checkpoint.state_payload
+        for checkpoint in store.load_session_snapshot(session_id).checkpoints
+        if checkpoint.state_payload.get("checkpoint_kind") == "context_compaction"
+    )
+    assert checkpoint_payload["checkpoint_kind"] == "context_compaction"
+    assert checkpoint_payload["resumable"] is True
+    assert checkpoint_payload["compacted_query_loop_state"]["messages"][1]["name"] == "auto_compact_summary"
 
 
 def test_runner_with_unbounded_max_turns_runs_until_terminal_result():

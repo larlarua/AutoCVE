@@ -32,6 +32,18 @@ def test_get_messages_after_compact_boundary_returns_tail_after_last_boundary():
     assert [item.content for item in result] == ["recent-1", "recent-2"]
 
 
+def test_get_messages_after_compact_boundary_keeps_compact_summary_for_next_model_turn():
+    messages = [
+        TranscriptItem(role=RuntimeMessageRole.SYSTEM, content="boundary", name="auto_compact_boundary", metadata={"kind": "compact_boundary"}),
+        TranscriptItem(role=RuntimeMessageRole.USER, content="durable summary", name="auto_compact_summary", metadata={"kind": "auto_compact_summary"}),
+        TranscriptItem(role=RuntimeMessageRole.USER, content="latest follow-up"),
+    ]
+
+    result = get_messages_after_compact_boundary(messages, QueryLoopState())
+
+    assert [item.content for item in result] == ["durable summary", "latest follow-up"]
+
+
 def test_apply_tool_result_budget_truncates_old_tool_results_when_over_budget():
     state = QueryLoopState(
         tool_use_context={
@@ -142,16 +154,16 @@ def test_apply_context_collapse_if_needed_replays_persisted_commit_view():
 def test_evaluate_blocking_limit_uses_restored_style_controller_when_present():
     state = QueryLoopState(
         tool_use_context={
-            "autocompact_controller": {"context_window": 20000, "max_output_tokens": 40}
+            "autocompact_controller": {"context_window": 1000, "max_output_tokens": 40}
         }
     )
-    messages = [TranscriptItem(role=RuntimeMessageRole.USER, content="A" * 17000)]
+    messages = [TranscriptItem(role=RuntimeMessageRole.USER, content="A" * 8000)]
 
     result = evaluate_blocking_limit(messages, state)
 
     assert result["blocked"] is True
-    assert result["blocking_limit"] == 16960
-    assert result["token_usage"] == 17000
+    assert result["blocking_limit"] == 970
+    assert result["token_usage"] >= 970
 
 
 

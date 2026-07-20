@@ -82,6 +82,15 @@ class Settings(BaseSettings):
     MANAGED_PROJECTS_ROOT: str = DEFAULT_MANAGED_PROJECTS_ROOT
     OUTPUT_LANGUAGE: str = "zh-CN"
 
+    # Disabled by default. These settings enable the authenticated Talos ->
+    # AutoCVE source archive hand-off used by private deployments.
+    TALOS_AUDIT_TOKEN: Optional[str] = None
+    TALOS_AUDIT_SERVICE_USER_EMAIL: Optional[str] = None
+    TALOS_SOURCE_ARCHIVE_DIR: Optional[str] = None
+    TALOS_AUDIT_MAX_ARCHIVE_SIZE_BYTES: int = 500 * 1024 * 1024
+    TALOS_AUDIT_MAX_ARCHIVE_FILES: int = 100_000
+    TALOS_AUDIT_MAX_UNCOMPRESSED_SIZE_BYTES: int = 2 * 1024 * 1024 * 1024
+
     CHECKMARX_FEATURE_ENABLED: bool = False
     CHECKMARX_BASE_URL: Optional[str] = None
     CHECKMARX_CLIENT_ID: str = "resource_owner_sast_client"

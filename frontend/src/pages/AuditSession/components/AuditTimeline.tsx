@@ -345,6 +345,7 @@ function ToolGroupBlock({
 export function AuditTimeline({
   messages,
   isStreaming,
+  isAutoCompacting,
   streamError,
   footer,
   onStopStreaming,
@@ -352,6 +353,7 @@ export function AuditTimeline({
 }: {
   messages: AuditSessionMessage[];
   isStreaming?: boolean;
+  isAutoCompacting?: boolean;
   streamError?: string | null;
   footer?: React.ReactNode;
   onStopStreaming?: () => void;
@@ -405,7 +407,7 @@ export function AuditTimeline({
           </div>
           <div className="flex items-center gap-3">
             <div className="rounded-full border border-[#e0e8e3] bg-white px-4 py-2 text-xs text-slate-600 shadow-sm">
-              {isStreaming ? "正在生成回复..." : `共 ${messages.length} 条会话消息`}
+              {isAutoCompacting ? "正在自动压缩上下文..." : isStreaming ? "正在生成回复..." : `共 ${messages.length} 条会话消息`}
             </div>
             {isStreaming && onStopStreaming ? (
               <Button
@@ -479,7 +481,11 @@ export function AuditTimeline({
                           <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-[#6fa27b]" />
                           <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-[#8fb99a] [animation-delay:120ms]" />
                           <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-[#b9d8c0] [animation-delay:240ms]" />
-                          <span className="ml-2">正在组织回答...</span>
+                      <span className="ml-2">
+                        {isAutoCompacting
+                          ? "正在自动压缩上下文，请稍候..."
+                          : "正在组织回答..."}
+                      </span>
                         </div>
                       ) : (
                         <div className="relative">

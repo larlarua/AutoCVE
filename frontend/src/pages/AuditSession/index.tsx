@@ -22,7 +22,7 @@ export default function AuditSessionPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [resuming, setResuming] = useState(false);
   const { session, messages, setMessages, toolCalls, skills, skillInvocations, memories, handoffs, loading, error, refresh } = useAuditSession(sessionId);
-  const { isStreaming, streamError, sendMessage, stopStreaming, streamingAssistantId } = useAuditSessionChatStream({
+  const { isStreaming, isAutoCompacting, streamError, sendMessage, stopStreaming, streamingAssistantId } = useAuditSessionChatStream({
     sessionId,
     setMessages,
     refresh,
@@ -120,6 +120,7 @@ export default function AuditSessionPage() {
             <AuditTimeline
               messages={messages}
               isStreaming={isStreaming}
+              isAutoCompacting={isAutoCompacting}
               streamError={streamError}
               onStopStreaming={stopStreaming}
               activeStreamingMessageId={streamingAssistantId}

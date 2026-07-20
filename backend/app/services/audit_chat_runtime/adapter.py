@@ -9,7 +9,10 @@ from app.services.audit_chat_runtime.context import (
     transcript_from_db_messages,
 )
 from app.services.audit_chat_runtime.prompts import AUDIT_CHAT_SYSTEM_PROMPT
-from app.services.finding_runtime.query_transitions import hydrate_query_loop_state
+from app.services.finding_runtime.query_transitions import (
+    refresh_query_loop_state_from_persisted_messages,
+    restore_compacted_query_loop_state_from_checkpoints,
+)
 from app.services.finding_runtime.skills import RuntimeSkillCatalog
 from app.services.runtime_core.explicit_skill_loader import load_explicit_skill_injections
 from app.services.runtime_core.memory_runtime import RuntimeMemoryManager, build_runtime_memory_prompt
@@ -41,6 +44,10 @@ class AuditChatRuntimeAdapter:
         snapshot = self._session_store.load_session_snapshot(session_id)
         runtime_state = self._session_store.load_runtime_state(session_id)
         query_loop_state = self._session_store.load_query_loop_state(session_id)
+        query_loop_state = restore_compacted_query_loop_state_from_checkpoints(
+            query_loop_state,
+            checkpoints=list(snapshot.checkpoints or []),
+        )
         latest_user_message = self._latest_user_message(snapshot.messages)
         latest_user_text = str(getattr(latest_user_message, "content", "") or "").strip()
 
@@ -115,7 +122,10 @@ class AuditChatRuntimeAdapter:
         refreshed_transcript = transcript_from_db_messages(snapshot.messages)
         self._session_store.save_query_loop_state(
             session_id,
-            hydrate_query_loop_state(query_loop_state, messages=refreshed_transcript),
+            refresh_query_loop_state_from_persisted_messages(
+                query_loop_state,
+                persisted_messages=refreshed_transcript,
+            ),
         )
         return {
             "prompt": skill_context.prompt,

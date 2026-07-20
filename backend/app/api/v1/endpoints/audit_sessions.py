@@ -23,6 +23,7 @@ from app.models.agent_task import AgentFinding, AgentTask, FindingStatus
 from app.models.audit_session import (
     AuditHandoff,
     AuditCheckpoint,
+    AuditCheckpointType,
     AuditMemory,
     AuditModelStreamAttempt,
     AuditSession,
@@ -45,6 +46,7 @@ from app.models.user import User
 from app.services.agent.tools.sandbox_tool import SandboxManager
 from app.services.audit_chat_runtime.bridge import AuditChatRuntimeBridge
 from app.services.finding_runtime.bridge import FindingRuntimeBridge
+from app.services.finding_runtime.models import RuntimeStopReason
 from app.services.llm.service import LLMService
 from app.services.runtime_core.runtime_guardrails import is_guardrails_enabled
 from app.services.finding_runtime.resume_queue import enqueue_audit_session_resume
@@ -194,6 +196,162 @@ class AuditSessionResumeResponse(BaseModel):
 
 def _format_sse_event(payload: dict[str, Any]) -> str:
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+_AUDIT_CHAT_SUCCESS_STOP_REASONS = {
+    RuntimeStopReason.COMPLETED.value,
+    RuntimeStopReason.HOOK_STOPPED.value,
+}
+
+_AUDIT_CHAT_ERROR_MESSAGES = {
+    RuntimeStopReason.BLOCKING_LIMIT.value: "当前上下文超过可处理范围，已停止本次继续对话。可以在压缩上下文后恢复。",
+    RuntimeStopReason.MAX_TURNS.value: "本次继续对话达到最大执行轮数，已停止。可以从当前检查点恢复。",
+    RuntimeStopReason.TOOL_TIMEOUT.value: "工具执行超时，已停止本次继续对话。可以重试或恢复。",
+    RuntimeStopReason.ABORTED_STREAMING.value: "继续对话已取消，已保存可恢复检查点。",
+    RuntimeStopReason.ABORTED_TOOLS.value: "工具执行已取消，已保存可恢复检查点。",
+}
+
+
+def _runtime_stop_reason_value(runner_result: Any) -> str | None:
+    stop_reason = getattr(runner_result, "stop_reason", None)
+    if stop_reason is None:
+        return None
+    return str(getattr(stop_reason, "value", stop_reason))
+
+
+async def _load_audit_chat_assistant_message(
+    *,
+    db: AsyncSession,
+    session_id: str,
+    runner_result: Any,
+) -> AuditSessionMessage | None:
+    message_id = getattr(runner_result, "assistant_message_id", None)
+    if not message_id:
+        return None
+    message = await db.get(AuditSessionMessage, message_id)
+    if message is None or message.session_id != session_id or message.role != "assistant":
+        return None
+    return message if (message.content or "").strip() else None
+
+
+async def _load_latest_audit_checkpoint_payload(
+    *,
+    db: AsyncSession,
+    session_id: str,
+    turn_id: str | None,
+) -> dict[str, Any]:
+    statement = select(AuditCheckpoint).where(AuditCheckpoint.session_id == session_id)
+    if turn_id:
+        statement = statement.where(AuditCheckpoint.turn_id == turn_id)
+    checkpoint = (await db.execute(statement.order_by(desc(AuditCheckpoint.created_at), desc(AuditCheckpoint.id)).limit(1))).scalars().first()
+    return dict(checkpoint.state_payload or {}) if checkpoint is not None else {}
+
+
+async def _build_audit_chat_failure(
+    *,
+    db: AsyncSession,
+    session_id: str,
+    runner_result: Any | None = None,
+    exception: BaseException | None = None,
+    missing_presentation: bool = False,
+) -> dict[str, Any]:
+    turn_id = str(getattr(runner_result, "turn_id", "") or "") or None
+    stop_reason = _runtime_stop_reason_value(runner_result)
+    source_checkpoint = await _load_latest_audit_checkpoint_payload(
+        db=db,
+        session_id=session_id,
+        turn_id=turn_id,
+    )
+    phase = str(source_checkpoint.get("phase") or "")
+
+    if missing_presentation:
+        error_kind = "empty_assistant_response"
+        message = "继续对话未生成可展示的助手回复，已保存可恢复检查点。"
+    elif isinstance(exception, asyncio.CancelledError):
+        error_kind = "cancelled"
+        stop_reason = RuntimeStopReason.ABORTED_STREAMING.value
+        message = _AUDIT_CHAT_ERROR_MESSAGES[stop_reason]
+    elif stop_reason == RuntimeStopReason.BLOCKING_LIMIT.value:
+        error_kind = "blocking_limit"
+        message = _AUDIT_CHAT_ERROR_MESSAGES[stop_reason]
+    elif stop_reason == RuntimeStopReason.MAX_TURNS.value:
+        error_kind = "max_turns"
+        message = _AUDIT_CHAT_ERROR_MESSAGES[stop_reason]
+    elif stop_reason == RuntimeStopReason.TOOL_TIMEOUT.value:
+        error_kind = "tool_timeout"
+        message = _AUDIT_CHAT_ERROR_MESSAGES[stop_reason]
+    elif stop_reason in {RuntimeStopReason.ABORTED_STREAMING.value, RuntimeStopReason.ABORTED_TOOLS.value}:
+        error_kind = "cancelled"
+        message = _AUDIT_CHAT_ERROR_MESSAGES[stop_reason]
+    elif phase == "tool_execution":
+        error_kind = "tool_execution_failed"
+        message = str(source_checkpoint.get("error") or "工具执行失败，已停止本次继续对话。可以从当前检查点恢复。")
+    elif stop_reason:
+        error_kind = stop_reason
+        message = str(source_checkpoint.get("error") or _AUDIT_CHAT_ERROR_MESSAGES.get(stop_reason) or "继续对话未能完成，已保存可恢复检查点。")
+    elif exception is not None:
+        error_kind = "runtime_exception"
+        message = str(exception) or "继续对话运行异常，已保存可恢复检查点。"
+    else:
+        error_kind = "missing_runner_result"
+        message = "继续对话未返回可确认的运行结果，已保存可恢复检查点。"
+
+    return {
+        "checkpoint_kind": "resumable_failed",
+        "resumable": True,
+        "phase": "audit_chat_follow_up",
+        "error_kind": error_kind,
+        "stop_reason": stop_reason,
+        "message": message,
+        "message_text": message,
+        "turn_id": turn_id,
+        "source_phase": phase or None,
+        "source_checkpoint": source_checkpoint or None,
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _persist_audit_chat_failure(
+    *,
+    db: AsyncSession,
+    session_id: str,
+    failure: dict[str, Any],
+) -> dict[str, Any]:
+    """Persist a resumable terminal failure without hiding the original SSE error."""
+    try:
+        session = await db.get(AuditSession, session_id)
+        if session is None:
+            return failure
+        await db.refresh(session)
+        runtime_state = dict(session.runtime_state_json or {})
+        runtime_state["resume_job"] = {
+            **dict(runtime_state.get("resume_job") or {}),
+            "status": "resumable_failed",
+            "error_kind": failure["error_kind"],
+            "error": failure["message"],
+            "can_resume": True,
+            "updated_at": failure["occurred_at"],
+        }
+        runtime_state["audit_chat_follow_up_failure"] = dict(failure)
+        session.runtime_state_json = runtime_state
+        session.state = "failed"
+
+        turn_id = failure.get("turn_id")
+        if turn_id:
+            turn = await db.get(AuditSessionTurn, turn_id)
+            if turn is None or turn.session_id != session_id:
+                turn_id = None
+        db.add(AuditCheckpoint(
+            session_id=session_id,
+            turn_id=turn_id,
+            checkpoint_type=AuditCheckpointType.AUTO.value,
+            state_payload=dict(failure),
+        ))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        failure = {**failure, "resumable": False, "persistence_error": True}
+    return failure
 
 
 def _chunk_text(content: str, chunk_size: int = 4) -> list[str]:
@@ -549,7 +707,7 @@ async def continue_audit_chat_session(
     content: str,
     db: AsyncSession,
     event_sink=None,
-) -> None:
+) -> dict[str, Any]:
     del content
     session = await db.get(AuditSession, session_id)
     if session is None:
@@ -557,11 +715,13 @@ async def continue_audit_chat_session(
     try:
         bridge, sandbox_manager, model_name, max_turns = await _build_audit_chat_follow_up_context(session=session, db=db)
     except HTTPException as exc:
+        # Preserve the legacy non-streaming mutation contract while allowing the
+        # streaming endpoint to turn the missing result into a structured error.
         if exc.status_code == 409:
-            return
+            return {"session_id": session_id, "runner_result": None, "runtime_error": str(exc.detail)}
         raise
     try:
-        await bridge.continue_chat_session(
+        return await bridge.continue_chat_session(
             session_id=session_id,
             model_name=model_name,
             max_turns=max_turns,
@@ -986,17 +1146,71 @@ async def stream_audit_session_message(
                     synced_managed_vulnerability = await _generate_and_sync_follow_up_managed_vulnerability(session=session, db=db)
                 else:
                     queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+                    runner_result: Any | None = None
+                    terminal_failure: dict[str, Any] | None = None
+                    terminal_message: AuditSessionMessage | None = None
 
                     async def collect_event(event: dict[str, Any]):
+                        # QueryLoop emits model-level done/error events before the complete ReAct
+                        # run has reached a terminal state. This endpoint owns the SSE terminal event.
+                        if event.get("type") in {"done", "error"}:
+                            return
                         await queue.put(event)
 
                     async def worker():
+                        nonlocal runner_result, terminal_failure, terminal_message
                         try:
-                            await continue_audit_chat_session(
+                            result = await continue_audit_chat_session(
                                 session_id=session_id,
                                 content=payload.content,
                                 db=db,
                                 event_sink=collect_event,
+                            )
+                            runner_result = result.get("runner_result") if isinstance(result, dict) else None
+                            runtime_error = str(result.get("runtime_error") or "") if isinstance(result, dict) else ""
+                            stop_reason = _runtime_stop_reason_value(runner_result)
+                            terminal_message = await _load_audit_chat_assistant_message(
+                                db=db,
+                                session_id=session_id,
+                                runner_result=runner_result,
+                            ) if runner_result is not None else None
+                            if stop_reason not in _AUDIT_CHAT_SUCCESS_STOP_REASONS or terminal_message is None:
+                                terminal_failure = await _build_audit_chat_failure(
+                                    db=db,
+                                    session_id=session_id,
+                                    runner_result=runner_result,
+                                    exception=RuntimeError(runtime_error) if runtime_error else None,
+                                    missing_presentation=(
+                                        stop_reason in _AUDIT_CHAT_SUCCESS_STOP_REASONS and terminal_message is None
+                                    ),
+                                )
+                                terminal_failure = await _persist_audit_chat_failure(
+                                    db=db,
+                                    session_id=session_id,
+                                    failure=terminal_failure,
+                                )
+                        except asyncio.CancelledError as exc:
+                            terminal_failure = await _persist_audit_chat_failure(
+                                db=db,
+                                session_id=session_id,
+                                failure=await _build_audit_chat_failure(
+                                    db=db,
+                                    session_id=session_id,
+                                    runner_result=runner_result,
+                                    exception=exc,
+                                ),
+                            )
+                            raise
+                        except Exception as exc:
+                            terminal_failure = await _persist_audit_chat_failure(
+                                db=db,
+                                session_id=session_id,
+                                failure=await _build_audit_chat_failure(
+                                    db=db,
+                                    session_id=session_id,
+                                    runner_result=runner_result,
+                                    exception=exc,
+                                ),
                             )
                         finally:
                             await queue.put(None)
@@ -1016,20 +1230,50 @@ async def stream_audit_session_message(
                     finally:
                         if not worker_task.done():
                             worker_task.cancel()
-                yield _format_sse_event({
-                    "type": "done",
-                    "usage": {},
-                    "mode": mode,
-                    "synced_managed_vulnerability": (
-                        ManagedVulnerabilityDetailResponse.model_validate(synced_managed_vulnerability).model_dump(mode="json")
-                        if synced_managed_vulnerability is not None
-                        else None
-                    ),
-                })
+                if mode == "generate_report_and_sync":
+                    yield _format_sse_event({
+                        "type": "done",
+                        "usage": {},
+                        "mode": mode,
+                        "synced_managed_vulnerability": ManagedVulnerabilityDetailResponse.model_validate(
+                            synced_managed_vulnerability
+                        ).model_dump(mode="json"),
+                    })
+                elif terminal_failure is not None:
+                    yield _format_sse_event({"type": "error", **terminal_failure})
+                elif terminal_message is not None:
+                    yield _format_sse_event({
+                        "type": "done",
+                        "message": _to_message_response(terminal_message).model_dump(mode="json"),
+                        "usage": {},
+                        "mode": mode,
+                        "synced_managed_vulnerability": None,
+                    })
+                else:
+                    # Defensive fallback: do not claim a completed response without a persisted assistant message.
+                    failure = await _persist_audit_chat_failure(
+                        db=db,
+                        session_id=session_id,
+                        failure=await _build_audit_chat_failure(
+                            db=db,
+                            session_id=session_id,
+                            runner_result=runner_result,
+                            missing_presentation=True,
+                        ),
+                    )
+                    yield _format_sse_event({"type": "error", **failure})
             except Exception as exc:
                 await db.rollback()
-                error_message = str(exc)
-                yield _format_sse_event({"type": "error", "message": error_message, "message_text": error_message})
+                failure = await _persist_audit_chat_failure(
+                    db=db,
+                    session_id=session_id,
+                    failure=await _build_audit_chat_failure(
+                        db=db,
+                        session_id=session_id,
+                        exception=exc,
+                    ),
+                )
+                yield _format_sse_event({"type": "error", **failure})
 
         return StreamingResponse(
             runtime_event_generator(),

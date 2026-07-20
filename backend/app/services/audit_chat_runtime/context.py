@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from app.models.audit_session import AuditSessionMessage
 from app.services.finding_runtime.models import RuntimeMessageRole, TranscriptItem
+from app.services.finding_runtime.query_transitions import (
+    PERSISTED_MESSAGE_ID_KEY,
+    PERSISTED_MESSAGE_SEQUENCE_KEY,
+)
 
 
 def render_audit_record_context(messages: list[AuditSessionMessage], *, max_messages: int = 120) -> str:
@@ -44,7 +48,11 @@ def transcript_from_db_messages(messages: list[AuditSessionMessage]) -> list[Tra
                 role=role,
                 content=message.content or "",
                 name=message.name,
-                metadata=dict(message.message_metadata or {}),
+                metadata={
+                    **dict(message.message_metadata or {}),
+                    PERSISTED_MESSAGE_ID_KEY: str(message.id),
+                    PERSISTED_MESSAGE_SEQUENCE_KEY: int(message.sequence),
+                },
                 payload=dict(message.payload or {}),
             )
         )

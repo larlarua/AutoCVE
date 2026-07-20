@@ -6,23 +6,18 @@ from uuid import uuid4
 
 from app.services.finding_runtime.compaction.auto_compact import (
     calculate_token_warning_state,
-    get_effective_context_window_size,
 )
+from app.services.finding_runtime.compaction.token_budget import estimate_request_token_budget
 from app.services.finding_runtime.models import RuntimeMessageRole, TranscriptItem
 from app.services.finding_runtime.query_state import QueryLoopState
 DEFAULT_COMPACT_BOUNDARY_NAMES = {
     "auto_compact_boundary",
     "microcompact_boundary",
-    "context_collapse_summary",
-    "auto_compact_summary",
     "reactive_compact_boundary",
 }
 DEFAULT_COMPACT_BOUNDARY_KINDS = {
     "compact_boundary",
     "microcompact_boundary",
-    "context_collapse_summary",
-    "auto_compact_summary",
-    "reactive_compact_summary",
 }
 
 
@@ -397,36 +392,48 @@ def _build_collapse_summary(messages: list[TranscriptItem]) -> str:
     return f"Collapsed earlier context: {joined}" if joined else "Collapsed earlier context."
 
 
-def evaluate_blocking_limit(messages: list[TranscriptItem], state: QueryLoopState) -> dict[str, int | bool]:
-    current_chars = sum(len(item.content or "") for item in messages)
-    controller = dict(_pipeline_config(state).get("autocompact_controller") or state.tool_use_context.get("autocompact_controller") or {})
-    if controller:
-        context_window = int(controller.get("context_window") or 0)
-        max_output_tokens = int(controller.get("max_output_tokens") or 0)
-        if context_window > 0 and max_output_tokens > 0:
-            warning_state = calculate_token_warning_state(
-                token_usage=current_chars,
-                model=str(controller.get("model") or "claude-sonnet-4-5"),
-                context_window=context_window,
-                max_output_tokens=max_output_tokens,
-            )
-            blocking_limit = get_effective_context_window_size(
-                model=str(controller.get("model") or "claude-sonnet-4-5"),
-                context_window=context_window,
-                max_output_tokens=max_output_tokens,
-            ) - 3000
-            return {
-                "blocked": bool(warning_state["is_at_blocking_limit"]),
-                "blocking_limit": blocking_limit,
-                "token_usage": current_chars,
-                "percent_left": int(warning_state["percent_left"]),
-            }
-    config = _pipeline_config(state).get("blocking_limit") or {}
-    max_chars = int(config.get("max_chars") or 0)
+def evaluate_blocking_limit(
+    messages: list[TranscriptItem],
+    state: QueryLoopState,
+    *,
+    model: str = "gpt-4",
+    system_prompt: str | None = None,
+    tool_definitions: list[dict[str, Any]] | None = None,
+) -> dict[str, int | bool | str]:
+    pipeline = _pipeline_config(state)
+    controller = dict(pipeline.get("autocompact_controller") or state.tool_use_context.get("autocompact_controller") or {})
+    budget = estimate_request_token_budget(
+        model=str(controller.get("model") or model),
+        system_prompt=system_prompt,
+        transcript=messages,
+        tool_definitions=tool_definitions,
+        controller=controller,
+    )
+    warning_state = calculate_token_warning_state(
+        token_usage=budget.input_tokens,
+        model=str(controller.get("model") or model),
+        context_window=budget.context_window_tokens,
+        max_output_tokens=int(controller.get("max_output_tokens") or 0),
+    )
+    # Keep an explicit legacy character limit as a compatibility guard for
+    # persisted sessions created before token-budget configuration existed.
+    # New limits are always computed in tokens.
+    legacy_limit = dict(pipeline.get("blocking_limit") or {})
+    legacy_max_chars = int(legacy_limit.get("max_chars") or 0)
+    if legacy_max_chars > 0 and sum(len(item.content or "") for item in messages) > legacy_max_chars:
+        return {
+            "blocked": True,
+            "blocking_limit": legacy_max_chars,
+            "token_usage": budget.input_tokens,
+            "percent_left": int(warning_state["percent_left"]),
+            "token_budget_source": budget.source,
+        }
     return {
-        "blocked": bool(max_chars > 0 and current_chars > max_chars),
-        "max_chars": max_chars,
-        "current_chars": current_chars,
+        "blocked": bool(warning_state["is_at_blocking_limit"]),
+        "blocking_limit": int(warning_state["blocking_limit"]),
+        "token_usage": budget.input_tokens,
+        "percent_left": int(warning_state["percent_left"]),
+        "token_budget_source": budget.source,
     }
 
 

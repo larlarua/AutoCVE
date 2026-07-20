@@ -114,6 +114,9 @@ export interface AuditSessionStreamEvent {
     | "error"
     | "llm_retry"
     | "assistant_tombstone"
+    | "context_compaction_started"
+    | "context_compacted"
+    | "context_compaction_failed"
     | "heartbeat";
   session_id?: string;
   project_id?: string;
@@ -129,6 +132,11 @@ export interface AuditSessionStreamEvent {
   attempt_id?: string;
   status?: string;
   message_id?: string;
+  pre_tokens?: number;
+  post_tokens?: number;
+  threshold_tokens?: number;
+  context_window_tokens?: number;
+  token_budget_source?: string;
   mode?: AuditSessionMessageMode;
   synced_managed_vulnerability?: ManagedVulnerability | null;
 }

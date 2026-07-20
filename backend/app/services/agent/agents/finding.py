@@ -485,6 +485,29 @@ class FindingAgent(AnalysisWorkflowAgent):
                     )
                 return
 
+            if event_type in {"context_compaction_started", "context_compacted", "context_compaction_failed"}:
+                await flush_pending_reasoning(event_type, message if isinstance(message, dict) else None)
+                lifecycle_messages = {
+                    "context_compaction_started": "正在自动压缩上下文，以继续本轮审计。",
+                    "context_compacted": "上下文已自动压缩，正在继续审计。",
+                    "context_compaction_failed": "自动压缩上下文未完成，将保留原上下文并继续恢复流程。",
+                }
+                await self.emit_event(
+                    "info" if event_type != "context_compaction_failed" else "error",
+                    str((event or {}).get("message_text") or lifecycle_messages[event_type]),
+                    metadata={
+                        "source": "finding_runtime",
+                        "runtime_event_type": event_type,
+                        "pre_tokens": (event or {}).get("pre_tokens") or (event or {}).get("token_usage"),
+                        "post_tokens": (event or {}).get("post_tokens"),
+                        "threshold_tokens": (event or {}).get("threshold_tokens"),
+                        "context_window_tokens": (event or {}).get("context_window_tokens"),
+                        "token_budget_source": (event or {}).get("token_budget_source"),
+                        "error_type": (event or {}).get("error_type"),
+                    },
+                )
+                return
+
             if event_type == "error":
                 await flush_pending_reasoning(event_type, message if isinstance(message, dict) else None)
                 raw_error = str((event or {}).get("error") or "").strip()
