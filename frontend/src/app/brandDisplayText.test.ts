@@ -35,3 +35,9 @@ test("internal branding hides the home menu item", () => {
 
   assert.match(routesSource, /visible: !internalBrandingEnabled/);
 });
+
+test("browser title uses the deployment branding configuration", () => {
+  const appSource = readFileSync(resolve(sourceRoot, "app/App.tsx"), "utf8");
+
+  assert.match(appSource, /document\.title = productName/);
+});

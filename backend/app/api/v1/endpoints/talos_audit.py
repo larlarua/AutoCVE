@@ -11,6 +11,7 @@ import hashlib
 import re
 import secrets
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Annotated, Literal
 
@@ -48,7 +49,7 @@ class TalosAuditRequest(BaseModel):
 class TalosAuditAcceptedResponse(BaseModel):
     request_id: str
     project_id: str
-    status: Literal["queued", "running", "completed", "failed"]
+    status: Literal["queued", "running", "completed", "failed", "cancelled"]
     reused: bool = False
 
 
@@ -58,13 +59,13 @@ class TalosAuditStatusResponse(TalosAuditAcceptedResponse):
 
 
 async def _require_talos_token(
-    x_autocve_talos_token: Annotated[str | None, Header(alias="X-AutoCVE-Talos-Token")] = None,
+    x_talos_token: Annotated[str | None, Header(alias="X-Talos-Token")] = None,
 ) -> None:
     """Authenticate Talos without exposing this private route by default."""
     configured_token = str(settings.TALOS_AUDIT_TOKEN or "").strip()
     if not settings.TALOS_AUDIT_ENABLED or not configured_token:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-    if not x_autocve_talos_token or not secrets.compare_digest(x_autocve_talos_token, configured_token):
+    if not x_talos_token or not secrets.compare_digest(x_talos_token, configured_token):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Talos integration token")
 
 
@@ -281,4 +282,33 @@ async def get_talos_audit_result(
     )
     if job is None:
         raise HTTPException(status_code=404, detail="Talos audit request was not found")
+    return _to_talos_audit_status(job)
+
+
+@router.post("/audits/{request_id}/cancel", response_model=TalosAuditStatusResponse)
+async def cancel_talos_audit(
+    request_id: str,
+    _: None = Depends(_require_talos_token),
+    db: AsyncSession = Depends(get_db),
+) -> TalosAuditStatusResponse:
+    """Request cancellation of a queued or running Talos audit."""
+    await _get_service_user(db)
+    job = await _find_talos_audit_job(request_id=request_id, db=db)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Talos audit request was not found")
+    if job.status == TalosAuditJobStatus.COMPLETED:
+        raise HTTPException(status_code=409, detail="Completed Talos audits cannot be cancelled")
+    if job.status == TalosAuditJobStatus.FAILED:
+        raise HTTPException(status_code=409, detail="Failed Talos audits cannot be cancelled")
+
+    if job.status != TalosAuditJobStatus.CANCELLED:
+        project = await db.get(Project, job.project_id)
+        job.status = TalosAuditJobStatus.CANCELLED
+        job.error_message = "Talos audit cancelled by request"
+        job.completed_at = datetime.now(timezone.utc)
+        if project is not None:
+            project.workspace_mode = "audit_cancelled"
+        await db.commit()
+        await db.refresh(job)
+
     return _to_talos_audit_status(job)

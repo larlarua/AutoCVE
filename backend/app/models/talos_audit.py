@@ -13,6 +13,7 @@ class TalosAuditJobStatus:
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class TalosAuditJob(Base):

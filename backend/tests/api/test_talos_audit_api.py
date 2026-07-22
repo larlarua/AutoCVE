@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import zipfile
 from pathlib import Path
@@ -50,7 +51,7 @@ async def test_talos_route_is_hidden_when_not_configured(monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/api/v1/integrations/talos/audits",
-            headers={"X-AutoCVE-Talos-Token": "ignored"},
+            headers={"X-Talos-Token": "ignored"},
             json={"request_id": "portal-1", "archive_path": "portal-1.zip"},
         )
 
@@ -98,7 +99,7 @@ async def test_talos_queues_zip_project_and_exposes_finalize_result(monkeypatch,
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/api/v1/integrations/talos/audits",
-            headers={"X-AutoCVE-Talos-Token": "test-secret"},
+            headers={"X-Talos-Token": "test-secret"},
             json={
                 "request_id": "portal-1",
                 "project_name": "Portal Demo",
@@ -142,7 +143,7 @@ async def test_talos_queues_zip_project_and_exposes_finalize_result(monkeypatch,
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         result_response = await client.get(
             "/api/v1/integrations/talos/audits/portal-1",
-            headers={"X-AutoCVE-Talos-Token": "test-secret"},
+            headers={"X-Talos-Token": "test-secret"},
         )
 
     assert result_response.status_code == 200, result_response.text
@@ -164,11 +165,60 @@ async def test_talos_rejects_path_outside_configured_archive_directory(monkeypat
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
             "/api/v1/integrations/talos/audits",
-            headers={"X-AutoCVE-Talos-Token": "test-secret"},
+            headers={"X-Talos-Token": "test-secret"},
             json={"request_id": "portal-1", "archive_path": "../secret.zip"},
         )
 
     assert response.status_code == 422
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_talos_cancel_marks_queued_job_cancelled(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        db.add(
+            User(
+                id="talos-service-user",
+                email="talos@example.internal",
+                hashed_password="not-used",
+                is_active=True,
+                is_superuser=True,
+            )
+        )
+        db.add(Project(id="talos-project", name="Talos Project", owner_id="talos-service-user", source_type="zip"))
+        db.add(
+            TalosAuditJob(
+                id="talos-job",
+                request_id="portal-1",
+                project_id="talos-project",
+                service_user_id="talos-service-user",
+                status=TalosAuditJobStatus.QUEUED,
+            )
+        )
+        await db.commit()
+
+    monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_TOKEN", "test-secret")
+    monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_ENABLED", True)
+    monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_SERVICE_USER_EMAIL", "talos@example.internal")
+    app = _build_app(session_factory)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/integrations/talos/audits/portal-1/cancel",
+            headers={"X-Talos-Token": "test-secret"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == TalosAuditJobStatus.CANCELLED
+    async with session_factory() as db:
+        job = await db.get(TalosAuditJob, "talos-job")
+        project = await db.get(Project, "talos-project")
+    assert job is not None and job.status == TalosAuditJobStatus.CANCELLED
+    assert project is not None and project.workspace_mode == "audit_cancelled"
     await engine.dispose()
 
 
@@ -237,4 +287,102 @@ async def test_talos_worker_stops_after_finalize_finding(monkeypatch):
     assert job is not None and job.status == TalosAuditJobStatus.COMPLETED
     assert job.finalize_finding == final_payload
     assert project is not None and project.workspace_mode == "audit_completed"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_talos_worker_persists_failure_after_runtime_error(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        db.add(
+            User(
+                id="talos-service-user",
+                email="talos@example.internal",
+                hashed_password="not-used",
+                is_active=True,
+                is_superuser=True,
+            )
+        )
+        db.add(Project(id="talos-project", name="Talos Project", owner_id="talos-service-user", source_type="zip"))
+        db.add(
+            TalosAuditJob(
+                id="talos-job",
+                request_id="portal-1",
+                project_id="talos-project",
+                service_user_id="talos-service-user",
+                status=TalosAuditJobStatus.QUEUED,
+            )
+        )
+        await db.commit()
+
+    async def fake_start_direct_audit_session(**_kwargs):
+        raise RuntimeError("model token quota is exhausted")
+
+    monkeypatch.setattr(talos_audit_runner, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(talos_audit_runner, "start_direct_audit_session", fake_start_direct_audit_session)
+
+    with pytest.raises(RuntimeError, match="token quota"):
+        await talos_audit_runner.run_talos_audit_job("talos-job")
+
+    async with session_factory() as db:
+        job = await db.get(TalosAuditJob, "talos-job")
+        project = await db.get(Project, "talos-project")
+
+    assert job is not None and job.status == TalosAuditJobStatus.FAILED
+    assert job.error_message == "model token quota is exhausted"
+    assert project is not None and project.workspace_mode == "audit_failed"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_talos_worker_marks_running_job_cancelled(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        db.add(
+            User(
+                id="talos-service-user",
+                email="talos@example.internal",
+                hashed_password="not-used",
+                is_active=True,
+                is_superuser=True,
+            )
+        )
+        db.add(Project(id="talos-project", name="Talos Project", owner_id="talos-service-user", source_type="zip"))
+        db.add(
+            TalosAuditJob(
+                id="talos-job",
+                request_id="portal-1",
+                project_id="talos-project",
+                service_user_id="talos-service-user",
+                status=TalosAuditJobStatus.QUEUED,
+            )
+        )
+        await db.commit()
+
+    async def fake_start_direct_audit_session(**_kwargs):
+        await asyncio.sleep(60)
+
+    async def fake_cancel_watch(_job_id, audit_task):
+        audit_task.cancel()
+
+    monkeypatch.setattr(talos_audit_runner, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(talos_audit_runner, "start_direct_audit_session", fake_start_direct_audit_session)
+    monkeypatch.setattr(talos_audit_runner, "_watch_talos_audit_cancellation", fake_cancel_watch)
+
+    await talos_audit_runner.run_talos_audit_job("talos-job")
+
+    async with session_factory() as db:
+        job = await db.get(TalosAuditJob, "talos-job")
+        project = await db.get(Project, "talos-project")
+
+    assert job is not None and job.status == TalosAuditJobStatus.CANCELLED
+    assert project is not None and project.workspace_mode == "audit_cancelled"
     await engine.dispose()

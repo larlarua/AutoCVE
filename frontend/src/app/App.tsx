@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { BrowserRouter, Routes, Route, Outlet } from "react-router-dom";
 import { Toaster } from "sonner";
 import Sidebar from "@/components/layout/Sidebar";
@@ -8,6 +8,7 @@ import { ProtectedRoute } from "./ProtectedRoute";
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 import NotFound from "@/pages/NotFound";
+import { productName } from "@/shared/config/branding";
 
 function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
@@ -29,6 +30,10 @@ function AppLayout() {
 }
 
 function App() {
+  useEffect(() => {
+    document.title = productName;
+  }, []);
+
   return (
     <AuthProvider>
       <BrowserRouter>

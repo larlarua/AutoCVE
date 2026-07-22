@@ -1,5 +1,6 @@
 import { Helmet, HelmetProvider } from "react-helmet-async";
 import { ReactNode } from "react";
+import { productName } from "@/shared/config/branding";
 
 interface PageMetaProps {
   title?: string;
@@ -22,13 +23,13 @@ export function AppWrapper({ children }: AppWrapperProps) {
 }
 
 export default function PageMeta({
-  title = "AutoCVE",
+  title = productName,
   description = "基于AI的现代化代码质量分析和审查服务，提供全面的代码安全检测、性能分析和最佳实践建议。",
   keywords = "代码审计,代码质量,AI分析,安全检测,性能优化,代码规范",
   image = "/autocve_icon.svg",
   url = window.location.href
 }: PageMetaProps) {
-  const fullTitle = title === "AutoCVE" ? title : `${title} - AutoCVE`;
+  const fullTitle = title === productName ? title : `${title} - ${productName}`;
 
   return (
     <Helmet>
@@ -43,7 +44,7 @@ export default function PageMeta({
       <meta property="og:image" content={image} />
       <meta property="og:url" content={url} />
       <meta property="og:type" content="website" />
-      <meta property="og:site_name" content="AutoCVE" />
+      <meta property="og:site_name" content={productName} />
 
       {/* Twitter Card */}
       <meta name="twitter:card" content="summary_large_image" />
@@ -53,7 +54,7 @@ export default function PageMeta({
 
       {/* 其他 */}
       <meta name="robots" content="index, follow" />
-      <meta name="author" content="AutoCVE" />
+      <meta name="author" content={productName} />
       <link rel="canonical" href={url} />
     </Helmet>
   );
