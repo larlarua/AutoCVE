@@ -12,9 +12,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.api.v1.endpoints.talos_audit as talos_audit_endpoint
+import app.services.talos_audit.runner as talos_audit_runner
 from app.api.v1.endpoints.talos_audit import router as talos_audit_router
 from app.db.base import Base
+from app.models.audit_session import AuditSession
 from app.models.project import Project
+from app.models.talos_audit import TalosAuditJob, TalosAuditJobStatus
 from app.models.user import User
 
 
@@ -56,7 +59,7 @@ async def test_talos_route_is_hidden_when_not_configured(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_talos_creates_zip_project_and_stops_after_finalize(monkeypatch, tmp_path):
+async def test_talos_queues_zip_project_and_exposes_finalize_result(monkeypatch, tmp_path):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with engine.begin() as connection:
@@ -78,22 +81,18 @@ async def test_talos_creates_zip_project_and_stops_after_finalize(monkeypatch, t
     source_root.mkdir()
     (source_root / "portal-1.zip").write_bytes(_zip_bytes())
     monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_TOKEN", "test-secret")
+    monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_ENABLED", True)
     monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_SERVICE_USER_EMAIL", "talos@example.internal")
     monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_SOURCE_ARCHIVE_DIR", str(source_root))
     monkeypatch.setattr(talos_audit_endpoint.settings, "ZIP_STORAGE_PATH", str(tmp_path / "stored-zips"))
     monkeypatch.setattr(talos_audit_endpoint.settings, "PROJECT_SOURCE_STORAGE_PATH", str(tmp_path / "project-sources"))
-
     final_payload = {"findings": [], "summary": "No verified findings."}
     called: dict[str, object] = {}
 
-    async def fake_start_direct_audit_session(*, project, content, guardrails_enabled, db, current_user, generate_reports):
-        del content, guardrails_enabled, db, current_user
-        called["project_id"] = project.id
-        called["generate_reports"] = generate_reports
-        return SimpleNamespace(id="session-finalized")
+    async def fake_enqueue_talos_audit_job(job_id: str):
+        called["job_id"] = job_id
 
-    monkeypatch.setattr(talos_audit_endpoint, "start_direct_audit_session", fake_start_direct_audit_session)
-    monkeypatch.setattr(talos_audit_endpoint, "_extract_direct_audit_final_payload", lambda _messages: final_payload)
+    monkeypatch.setattr(talos_audit_endpoint, "enqueue_talos_audit_job", fake_enqueue_talos_audit_job)
 
     app = _build_app(session_factory)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -108,18 +107,47 @@ async def test_talos_creates_zip_project_and_stops_after_finalize(monkeypatch, t
         )
 
     assert response.status_code == 200, response.text
-    assert response.json()["finalize_finding"] == final_payload
-    assert response.json()["reused"] is False
-    assert called["generate_reports"] is False
+    acknowledgement = response.json()
+    assert set(acknowledgement) == {"request_id", "project_id", "status", "reused"}
+    assert acknowledgement["request_id"] == "portal-1"
+    assert acknowledgement["status"] == "queued"
+    assert acknowledgement["reused"] is False
 
     async with session_factory() as db:
         project = (await db.execute(select(Project))).scalar_one()
-        assert project.id == called["project_id"]
+        job = (await db.execute(select(TalosAuditJob))).scalar_one()
+        assert job.id == called["job_id"]
+        assert job.project_id == project.id
+        assert job.status == TalosAuditJobStatus.QUEUED
         assert project.source_type == "zip"
         assert project.repository_url == "talos:portal-1"
-        assert project.workspace_mode == "persistent_source"
+        assert project.workspace_mode == "audit_queued"
         assert project.local_path is not None
         assert (Path(project.local_path) / "app.py").read_text(encoding="utf-8") == "print('hello')\n"
+        job.status = TalosAuditJobStatus.COMPLETED
+        db.add(
+            AuditSession(
+                id="session-finalized",
+                project_id=project.id,
+                task_id=None,
+                runtime_stack="runtime",
+                state="completed",
+                runtime_state_json={},
+            )
+        )
+        job.audit_session_id = "session-finalized"
+        job.finalize_finding = final_payload
+        await db.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        result_response = await client.get(
+            "/api/v1/integrations/talos/audits/portal-1",
+            headers={"X-AutoCVE-Talos-Token": "test-secret"},
+        )
+
+    assert result_response.status_code == 200, result_response.text
+    assert result_response.json()["status"] == "completed"
+    assert result_response.json()["finalize_finding"] == final_payload
 
     await engine.dispose()
 
@@ -130,6 +158,7 @@ async def test_talos_rejects_path_outside_configured_archive_directory(monkeypat
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     app = _build_app(session_factory)
     monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_TOKEN", "test-secret")
+    monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_ENABLED", True)
     monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_SOURCE_ARCHIVE_DIR", str(tmp_path))
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -140,4 +169,72 @@ async def test_talos_rejects_path_outside_configured_archive_directory(monkeypat
         )
 
     assert response.status_code == 422
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_talos_worker_stops_after_finalize_finding(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    async with session_factory() as db:
+        db.add(
+            User(
+                id="talos-service-user",
+                email="talos@example.internal",
+                hashed_password="not-used",
+                is_active=True,
+                is_superuser=True,
+            )
+        )
+        db.add(Project(id="talos-project", name="Talos Project", owner_id="talos-service-user", source_type="zip"))
+        db.add(
+            TalosAuditJob(
+                id="talos-job",
+                request_id="portal-1",
+                project_id="talos-project",
+                service_user_id="talos-service-user",
+                status=TalosAuditJobStatus.QUEUED,
+            )
+        )
+        await db.commit()
+
+    called: dict[str, object] = {}
+    final_payload = {"findings": [], "summary": "No verified findings."}
+
+    async def fake_start_direct_audit_session(*, generate_reports, db, project, **kwargs):
+        called["generate_reports"] = generate_reports
+        db.add(
+            AuditSession(
+                id="session-finalized",
+                project_id=project.id,
+                task_id=None,
+                runtime_stack="runtime",
+                state="completed",
+                runtime_state_json={},
+            )
+        )
+        await db.commit()
+        return SimpleNamespace(id="session-finalized")
+
+    async def fake_load_messages(**kwargs):
+        return []
+
+    monkeypatch.setattr(talos_audit_runner, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(talos_audit_runner, "start_direct_audit_session", fake_start_direct_audit_session)
+    monkeypatch.setattr(talos_audit_runner, "_load_direct_audit_messages", fake_load_messages)
+    monkeypatch.setattr(talos_audit_runner, "_extract_direct_audit_final_payload", lambda _messages: final_payload)
+
+    await talos_audit_runner.run_talos_audit_job("talos-job")
+
+    async with session_factory() as db:
+        job = await db.get(TalosAuditJob, "talos-job")
+        project = await db.get(Project, "talos-project")
+
+    assert called["generate_reports"] is False
+    assert job is not None and job.status == TalosAuditJobStatus.COMPLETED
+    assert job.finalize_finding == final_payload
+    assert project is not None and project.workspace_mode == "audit_completed"
     await engine.dispose()

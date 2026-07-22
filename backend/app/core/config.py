@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     # Disabled by default. These settings enable the authenticated Talos ->
     # AutoCVE source archive hand-off used by private deployments.
     TALOS_AUDIT_TOKEN: Optional[str] = None
+    TALOS_AUDIT_ENABLED: bool = False
     TALOS_AUDIT_SERVICE_USER_EMAIL: Optional[str] = None
     TALOS_SOURCE_ARCHIVE_DIR: Optional[str] = None
     TALOS_AUDIT_MAX_ARCHIVE_SIZE_BYTES: int = 500 * 1024 * 1024

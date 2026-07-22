@@ -15,6 +15,7 @@ import ReportTemplatesPage from '@/pages/ReportTemplatesPage';
 import SkillsManager from '@/pages/SkillsManager';
 import TaskDetail from '@/pages/TaskDetail';
 import VulnerabilityManagement from '@/pages/VulnerabilityManagement';
+import { internalBrandingEnabled } from '@/shared/config/branding';
 
 export interface RouteConfig {
   name: string;
@@ -27,7 +28,7 @@ export interface RouteConfig {
 // const enableCheckmarxScan = import.meta.env.VITE_ENABLE_CHECKMARX_SCAN === 'true';
 const enableCheckmarxScan = false;
 const routes: RouteConfig[] = [
-  { name: '首页', labelKey: "routes.home", path: '/', element: <HomeCover />, visible: true },
+  { name: '首页', labelKey: "routes.home", path: '/', element: <HomeCover />, visible: !internalBrandingEnabled },
   { name: 'Agent审计详情', labelKey: "routes.agentAuditDetail", path: '/agent-audit/:taskId', element: <AgentAudit />, visible: false },
   { name: '审计会话', labelKey: "routes.auditSession", path: '/audit-sessions/:sessionId', element: <AuditSession />, visible: false },
   { name: '仪表盘', labelKey: "routes.dashboard", path: '/dashboard', element: <Dashboard />, visible: true },

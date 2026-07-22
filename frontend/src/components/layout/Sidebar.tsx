@@ -21,6 +21,7 @@ import {
 
 import routes from '@/app/routes';
 import { Button } from '@/components/ui/button';
+import { defaultLandingPath, productName } from '@/shared/config/branding';
 import { appVersionLabel } from '@/shared/config/version';
 
 const routeIcons: Record<string, ReactNode> = {
@@ -76,14 +77,14 @@ export default function Sidebar({ collapsed, setCollapsed }: SidebarProps) {
 
           <div className={`relative flex h-20 flex-shrink-0 items-center ${collapsed ? 'justify-center px-3' : 'justify-between px-5'} border-b border-slate-200/70`}>
             <Link
-              to="/"
+              to={defaultLandingPath}
               className={`group flex items-center gap-3 ${collapsed ? 'justify-center' : ''}`}
               onClick={() => setMobileOpen(false)}
             >
-              <img src="/autocve_icon.svg" alt="AutoCVE" className="h-12 w-12 object-contain" />
+              <img src="/autocve_icon.svg" alt={productName} className="h-12 w-12 object-contain" />
               {!collapsed && (
                 <div className="min-w-0">
-                  <div className="text-[1.35rem] font-semibold tracking-[-0.03em] text-slate-900">AutoCVE</div>
+                  <div className="text-[1.35rem] font-semibold tracking-[-0.03em] text-slate-900">{productName}</div>
                 </div>
               )}
             </Link>

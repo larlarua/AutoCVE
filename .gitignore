@@ -171,6 +171,10 @@ Thumbs.db
 secrets/
 .secrets/
 
+# Department-only deployment and integration notes
+docker-compose.local.yml
+docs/TALOS_INTEGRATION.md
+
 # Agent checkpoints and data
 agent_checkpoints/
 data/

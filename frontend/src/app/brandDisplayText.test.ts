@@ -4,33 +4,34 @@ import { resolve } from "node:path";
 import test from "node:test";
 
 const sourceRoot = resolve(import.meta.dirname, "..");
-const oldBrandPattern = new RegExp(["AI" + " Audit", "Audit" + "AI", "AI" + "Audit"].join("|"));
-
-test("login screen shows AutoCVE brand text and icon metadata", () => {
+test("login screen uses the deployment branding configuration", () => {
   const loginSource = readFileSync(resolve(sourceRoot, "pages/Login.tsx"), "utf8");
 
-  assert.match(loginSource, />AutoCVE</);
-  assert.match(loginSource, /\\u767b\\u5f55 AutoCVE/);
-  assert.match(loginSource, /alt="AutoCVE"/);
+  assert.match(loginSource, /productName/);
+  assert.match(loginSource, /defaultLandingPath/);
+  assert.match(loginSource, /alt=\{productName\}/);
   assert.match(loginSource, /\/autocve_icon\.svg/);
-  assert.doesNotMatch(loginSource, oldBrandPattern);
 });
 
-test("home shell shows AutoCVE in the sidebar brand", () => {
+test("home shell uses the deployment branding configuration", () => {
   const sidebarSource = readFileSync(resolve(sourceRoot, "components/layout/Sidebar.tsx"), "utf8");
 
-  assert.match(sidebarSource, />AutoCVE</);
-  assert.match(sidebarSource, /alt="AutoCVE"/);
+  assert.match(sidebarSource, /productName/);
+  assert.match(sidebarSource, /defaultLandingPath/);
+  assert.match(sidebarSource, /alt=\{productName\}/);
   assert.match(sidebarSource, /\/autocve_icon\.svg/);
-  assert.doesNotMatch(sidebarSource, oldBrandPattern);
 });
 
-test("home splash screen uses the requested visible runtime labels", () => {
-  const splashSource = readFileSync(resolve(sourceRoot, "pages/AgentAudit/components/SplashScreen.tsx"), "utf8");
+test("branding configuration preserves the OSS default and supports the internal name", () => {
+  const brandingSource = readFileSync(resolve(sourceRoot, "shared/config/branding.ts"), "utf8");
 
-  assert.match(splashSource, /Loading AutoCVE Core/);
-  assert.match(splashSource, /root@autocve:~#/);
-  assert.match(splashSource, />Auto\s*<\/span>\s*<span[^>]*>CVE</);
-  assert.doesNotMatch(splashSource, oldBrandPattern);
-  assert.doesNotMatch(splashSource, new RegExp("root@" + "ai" + "audit:~#"));
+  assert.match(brandingSource, /VITE_INTERNAL_BRANDING/);
+  assert.match(brandingSource, /"AIAudit"/);
+  assert.match(brandingSource, /"AutoCVE"/);
+});
+
+test("internal branding hides the home menu item", () => {
+  const routesSource = readFileSync(resolve(sourceRoot, "app/routes.tsx"), "utf8");
+
+  assert.match(routesSource, /visible: !internalBrandingEnabled/);
 });

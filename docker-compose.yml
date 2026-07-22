@@ -219,12 +219,14 @@ services:
         all_proxy: ''
         ALL_PROXY: ''
         VITE_ENABLE_CHECKMARX_SCAN: ${VITE_ENABLE_CHECKMARX_SCAN:-false}
+        VITE_INTERNAL_BRANDING: ${VITE_INTERNAL_BRANDING:-false}
         VITE_APP_VERSION: ${VITE_APP_VERSION:-}
     restart: unless-stopped
     environment:
       VITE_API_BASE_URL: /api/v1
       VITE_HOST_PROJECT_ROOT: ${VITE_HOST_PROJECT_ROOT:-}
       VITE_ENABLE_CHECKMARX_SCAN: ${VITE_ENABLE_CHECKMARX_SCAN:-false}
+      VITE_INTERNAL_BRANDING: ${VITE_INTERNAL_BRANDING:-false}
       HTTP_PROXY: ''
       HTTPS_PROXY: ''
       http_proxy: ''

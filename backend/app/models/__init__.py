@@ -35,6 +35,7 @@ from .audit_session import (
 from .report_template import AgentTaskReport
 from .managed_vulnerability import ManagedVulnerability, ManagedVulnerabilityReport
 from .checkmarx_scan import CheckmarxScanJob, CheckmarxScanResult
+from .talos_audit import TalosAuditJob, TalosAuditJobStatus
 from .one_click_cve import (
     OneClickCveBatch,
     OneClickCveBatchProject,

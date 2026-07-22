@@ -11,6 +11,8 @@ from arq.worker import func
 from app.core.config import settings
 from app.services.agent.task_executor import execute_agent_task
 from app.services.agent.task_queue import AGENT_TASK_JOB_NAME
+from app.services.talos_audit.runner import run_talos_audit_job
+from app.services.talos_audit.task_queue import TALOS_AUDIT_JOB_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +51,16 @@ async def execute_agent_task_job(ctx: dict[str, Any], task_id: str) -> None:
     await execute_agent_task(task_id)
 
 
+async def execute_talos_audit_job(ctx: dict[str, Any], job_id: str) -> None:
+    logger.info("Agent worker picked Talos audit job %s", job_id)
+    await run_talos_audit_job(job_id)
+
+
 class WorkerSettings:
-    functions = [func(execute_agent_task_job, name=AGENT_TASK_JOB_NAME)]
+    functions = [
+        func(execute_agent_task_job, name=AGENT_TASK_JOB_NAME),
+        func(execute_talos_audit_job, name=TALOS_AUDIT_JOB_NAME),
+    ]
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
     queue_name = settings.AGENT_TASK_QUEUE_NAME
     max_jobs = settings.AGENT_WORKER_CONCURRENCY
