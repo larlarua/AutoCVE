@@ -20,9 +20,18 @@ from app.services.finding_runtime.config import FindingRuntimeStack
 
 logger = logging.getLogger(__name__)
 
+_TALOS_FINDING_FIRST_WORKFLOW = {
+    "agentStates": {
+        "scan": {"enabled": False},
+        "triage": {"enabled": False},
+        "finding": {"enabled": True},
+        "verification": {"enabled": False},
+    }
+}
+
 
 def _build_talos_agent_task(*, job: TalosAuditJob, project: Project, service_user: User) -> AgentTask:
-    """Create the same persisted task used by the normal intelligent-audit flow."""
+    """Create a finding-first intelligent audit (recon → finding → FinalizeFinding)."""
     return AgentTask(
         id=str(uuid4()),
         project_id=project.id,
@@ -43,7 +52,14 @@ def _build_talos_agent_task(*, job: TalosAuditJob, project: Project, service_use
             "skip_report_generation": True,
             "talos_audit_job_id": job.id,
         },
-        audit_scope={"talos": {"request_id": job.request_id}},
+        # Do not inherit the service user's interactive workflow settings: a
+        # full workflow can enable scan + runtime triage, which is not part of
+        # the Portal/Talos contract. Recon and orchestrator are locked on by
+        # the task executor; this scope keeps only the finding phase enabled.
+        audit_scope={
+            "talos": {"request_id": job.request_id},
+            "workflow": _TALOS_FINDING_FIRST_WORKFLOW,
+        },
         created_by=service_user.id,
     )
 

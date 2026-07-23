@@ -315,6 +315,7 @@ async def test_talos_worker_stops_after_finalize_finding(monkeypatch):
             task = await worker_db.get(AgentTask, task_id)
             assert task is not None
             called["agent_config"] = dict(task.agent_config or {})
+            called["audit_scope"] = dict(task.audit_scope or {})
             task.status = AgentTaskStatus.COMPLETED
             worker_db.add(
                 AuditSession(
@@ -352,6 +353,12 @@ async def test_talos_worker_stops_after_finalize_finding(monkeypatch):
 
     assert called["agent_config"]["finding_runtime_stack"] == "runtime"
     assert called["agent_config"]["skip_report_generation"] is True
+    assert called["audit_scope"]["workflow"]["agentStates"] == {
+        "scan": {"enabled": False},
+        "triage": {"enabled": False},
+        "finding": {"enabled": True},
+        "verification": {"enabled": False},
+    }
     assert job is not None and job.status == TalosAuditJobStatus.COMPLETED
     assert job.finalize_finding == final_payload
     assert project is not None and project.workspace_mode == "audit_completed"
