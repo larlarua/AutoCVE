@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 import os
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Callable, Literal, Optional
 from uuid import uuid4
@@ -76,6 +77,35 @@ class DirectAuditGuardrailUpdate(BaseModel):
 
 class DirectAuditToolApprovalRequest(BaseModel):
     scope: Literal["single_use", "session"] = "single_use"
+
+
+@dataclass(slots=True)
+class DirectAuditSessionExecution:
+    """Terminal data produced by a direct audit without changing its public return type."""
+
+    session: AuditSession
+    final_payload: dict[str, Any] | None
+    finalized: bool
+
+
+def _is_finalized_finding_payload(runner_result: Any, final_payload: Any) -> bool:
+    """Return whether the Finding runtime reached a real terminal result.
+
+    A valid ``FinalizeFinding`` tool call is authoritative.  The fallback payload
+    intentionally carries ``is_final=False`` and ``requires_retry=True`` and must
+    never be exposed to Talos as a completed audit.
+    """
+    completion_mode = getattr(runner_result, "completion_mode", None)
+    if completion_mode is None and isinstance(runner_result, dict):
+        completion_mode = runner_result.get("completion_mode") or runner_result.get("runtime_completion_mode")
+    completion_value = getattr(completion_mode, "value", completion_mode)
+    if str(completion_value or "").strip().lower() == "finalize_tool":
+        return True
+    return bool(
+        isinstance(final_payload, dict)
+        and final_payload.get("is_final") is True
+        and not final_payload.get("requires_retry")
+    )
 
 
 def _build_direct_audit_system_prompt(project: Project) -> str:
@@ -366,6 +396,7 @@ async def _ensure_direct_audit_outputs(
     model_name: str | None = None,
     max_turns: int | None = None,
     generate_reports: bool = True,
+    runner_result: TurnExecutionResult | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     owns_follow_up_context = bridge is None or sandbox_manager is None or model_name is None or max_turns is None
     if owns_follow_up_context:
@@ -383,7 +414,11 @@ async def _ensure_direct_audit_outputs(
 
     report_service = VulnerabilityReportGenerationService()
     messages = await _load_direct_audit_messages(session_id=session.id, db=db)
-    final_payload = _extract_direct_audit_final_payload(messages)
+    runtime_final_payload = getattr(runner_result, "final_payload", None)
+    if runtime_final_payload is None and isinstance(runner_result, dict):
+        runtime_final_payload = runner_result.get("final_payload")
+    final_payload = runtime_final_payload if isinstance(runtime_final_payload, dict) else _extract_direct_audit_final_payload(messages)
+    finalization_runner_result = runner_result
     report_bundle = _extract_direct_audit_report_bundle(messages, report_service=report_service)
     report_error: str | None = None
 
@@ -398,6 +433,7 @@ async def _ensure_direct_audit_outputs(
                 fallback_payload_builder=FindingRuntimeBridge._default_fallback_payload,
             )
             final_payload = continuation.get("final_payload")
+            finalization_runner_result = continuation.get("runner_result")
             messages = await _load_direct_audit_messages(session_id=session.id, db=db)
             report_bundle = _extract_direct_audit_report_bundle(messages, report_service=report_service)
 
@@ -477,6 +513,7 @@ async def _ensure_direct_audit_outputs(
 
     return {
         "final_payload": final_payload,
+        "finalized": _is_finalized_finding_payload(finalization_runner_result, final_payload),
         "report_bundle": report_bundle,
         "report_error": report_error,
     }
@@ -709,7 +746,7 @@ def _grant_tool_call_approval(session: AuditSession, tool_call: AuditToolCall, *
     raise HTTPException(status_code=400, detail="This tool is not yet approveable in Agent Direct Audit")
 
 
-async def start_direct_audit_session(
+async def start_direct_audit_session_with_result(
     *,
     project: Project,
     content: str,
@@ -717,7 +754,7 @@ async def start_direct_audit_session(
     db: AsyncSession,
     current_user: User,
     generate_reports: bool = True,
-) -> AuditSession:
+) -> DirectAuditSessionExecution:
     bridge, sandbox_manager, model_name, max_turns, system_prompt, recon_payload = await _build_direct_runtime_context(
         project=project,
         db=db,
@@ -749,8 +786,9 @@ async def start_direct_audit_session(
         if runtime_error:
             raise HTTPException(status_code=400, detail=runtime_error)
         session = await db.get(AuditSession, result["session_id"])
+        outputs: dict[str, Any] = {}
         if session is not None:
-            await _ensure_direct_audit_outputs(
+            outputs = await _ensure_direct_audit_outputs(
                 session=session,
                 project=project,
                 db=db,
@@ -760,6 +798,7 @@ async def start_direct_audit_session(
                 model_name=model_name,
                 max_turns=max_turns,
                 generate_reports=generate_reports,
+                runner_result=result.get("runner_result"),
             )
     finally:
         try:
@@ -770,7 +809,32 @@ async def start_direct_audit_session(
     session = await db.get(AuditSession, result["session_id"])
     if session is None:
         raise HTTPException(status_code=500, detail="Direct audit session was not persisted")
-    return session
+    return DirectAuditSessionExecution(
+        session=session,
+        final_payload=outputs.get("final_payload"),
+        finalized=bool(outputs.get("finalized")),
+    )
+
+
+async def start_direct_audit_session(
+    *,
+    project: Project,
+    content: str,
+    guardrails_enabled: bool,
+    db: AsyncSession,
+    current_user: User,
+    generate_reports: bool = True,
+) -> AuditSession:
+    """Run a direct audit and return its session (legacy public contract)."""
+    execution = await start_direct_audit_session_with_result(
+        project=project,
+        content=content,
+        guardrails_enabled=guardrails_enabled,
+        db=db,
+        current_user=current_user,
+        generate_reports=generate_reports,
+    )
+    return execution.session
 
 
 async def start_direct_audit_session_stream(

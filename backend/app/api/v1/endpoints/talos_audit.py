@@ -56,6 +56,7 @@ class TalosAuditAcceptedResponse(BaseModel):
 class TalosAuditStatusResponse(TalosAuditAcceptedResponse):
     session_id: str | None = None
     finalize_finding: dict[str, Any] | None = None
+    error_message: str | None = None
 
 
 async def _require_talos_token(
@@ -161,6 +162,7 @@ def _to_talos_audit_status(job: TalosAuditJob, *, reused: bool = False) -> Talos
         status=job.status,
         session_id=job.audit_session_id,
         finalize_finding=job.finalize_finding,
+        error_message=job.error_message,
         reused=reused,
     )
 
@@ -237,7 +239,7 @@ async def start_talos_audit(
     )
     if existing_job is not None:
         current = _to_talos_audit_status(existing_job, reused=True)
-        return TalosAuditAcceptedResponse(**current.model_dump(exclude={"session_id", "finalize_finding"}))
+        return TalosAuditAcceptedResponse(**current.model_dump(exclude={"session_id", "finalize_finding", "error_message"}))
 
     project = await _create_project_from_archive(
         request=payload,

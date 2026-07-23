@@ -6,9 +6,7 @@ import logging
 from datetime import datetime, timezone
 
 from app.api.v1.endpoints.agent_direct_audit import (
-    _extract_direct_audit_final_payload,
-    _load_direct_audit_messages,
-    start_direct_audit_session,
+    start_direct_audit_session_with_result,
 )
 from app.db.session import AsyncSessionLocal
 from app.models.project import Project
@@ -74,7 +72,7 @@ async def run_talos_audit_job(job_id: str) -> None:
         await db.commit()
 
         audit_task = asyncio.create_task(
-            start_direct_audit_session(
+            start_direct_audit_session_with_result(
                 project=project,
                 content=(
                     "Perform the requested source-code security audit. Start from the supplied recon context, "
@@ -89,11 +87,10 @@ async def run_talos_audit_job(job_id: str) -> None:
         )
         cancel_watch_task = asyncio.create_task(_watch_talos_audit_cancellation(job_id, audit_task))
         try:
-            session = await audit_task
-            final_payload = _extract_direct_audit_final_payload(
-                await _load_direct_audit_messages(session_id=session.id, db=db)
-            )
-            if final_payload is None:
+            execution = await audit_task
+            session = execution.session
+            final_payload = execution.final_payload
+            if not execution.finalized:
                 raise RuntimeError("Audit completed without a FinalizeFinding payload")
         except asyncio.CancelledError:
             await db.rollback()

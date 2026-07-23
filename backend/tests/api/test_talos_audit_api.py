@@ -149,6 +149,7 @@ async def test_talos_queues_zip_project_and_exposes_finalize_result(monkeypatch,
     assert result_response.status_code == 200, result_response.text
     assert result_response.json()["status"] == "completed"
     assert result_response.json()["finalize_finding"] == final_payload
+    assert result_response.json()["error_message"] is None
 
     await engine.dispose()
 
@@ -214,6 +215,7 @@ async def test_talos_cancel_marks_queued_job_cancelled(monkeypatch):
 
     assert response.status_code == 200, response.text
     assert response.json()["status"] == TalosAuditJobStatus.CANCELLED
+    assert response.json()["error_message"] == "Talos audit cancelled by request"
     async with session_factory() as db:
         job = await db.get(TalosAuditJob, "talos-job")
         project = await db.get(Project, "talos-project")
@@ -267,15 +269,14 @@ async def test_talos_worker_stops_after_finalize_finding(monkeypatch):
             )
         )
         await db.commit()
-        return SimpleNamespace(id="session-finalized")
-
-    async def fake_load_messages(**kwargs):
-        return []
+        return SimpleNamespace(
+            session=SimpleNamespace(id="session-finalized"),
+            final_payload=final_payload,
+            finalized=True,
+        )
 
     monkeypatch.setattr(talos_audit_runner, "AsyncSessionLocal", session_factory)
-    monkeypatch.setattr(talos_audit_runner, "start_direct_audit_session", fake_start_direct_audit_session)
-    monkeypatch.setattr(talos_audit_runner, "_load_direct_audit_messages", fake_load_messages)
-    monkeypatch.setattr(talos_audit_runner, "_extract_direct_audit_final_payload", lambda _messages: final_payload)
+    monkeypatch.setattr(talos_audit_runner, "start_direct_audit_session_with_result", fake_start_direct_audit_session)
 
     await talos_audit_runner.run_talos_audit_job("talos-job")
 
@@ -323,7 +324,7 @@ async def test_talos_worker_persists_failure_after_runtime_error(monkeypatch):
         raise RuntimeError("model token quota is exhausted")
 
     monkeypatch.setattr(talos_audit_runner, "AsyncSessionLocal", session_factory)
-    monkeypatch.setattr(talos_audit_runner, "start_direct_audit_session", fake_start_direct_audit_session)
+    monkeypatch.setattr(talos_audit_runner, "start_direct_audit_session_with_result", fake_start_direct_audit_session)
 
     with pytest.raises(RuntimeError, match="token quota"):
         await talos_audit_runner.run_talos_audit_job("talos-job")
@@ -374,7 +375,7 @@ async def test_talos_worker_marks_running_job_cancelled(monkeypatch):
         audit_task.cancel()
 
     monkeypatch.setattr(talos_audit_runner, "AsyncSessionLocal", session_factory)
-    monkeypatch.setattr(talos_audit_runner, "start_direct_audit_session", fake_start_direct_audit_session)
+    monkeypatch.setattr(talos_audit_runner, "start_direct_audit_session_with_result", fake_start_direct_audit_session)
     monkeypatch.setattr(talos_audit_runner, "_watch_talos_audit_cancellation", fake_cancel_watch)
 
     await talos_audit_runner.run_talos_audit_job("talos-job")
