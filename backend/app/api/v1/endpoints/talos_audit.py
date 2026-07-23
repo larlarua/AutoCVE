@@ -1,22 +1,24 @@
-"""Private Talos integration for auditing an already received source archive.
+"""Private Talos integration for auditing Portal-received source archives.
 
 The endpoint is deliberately disabled unless an operator configures a token and
-an existing AutoCVE superuser.  Talos supplies only a *relative* archive path;
-the resolved file must remain below ``TALOS_SOURCE_ARCHIVE_DIR``.
+an existing AutoCVE superuser.  Talos supplies only Portal's request ID; the
+archive path is resolved internally from Portal receiver metadata.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import secrets
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,13 +41,23 @@ from app.services.zip_storage import (
 router = APIRouter()
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_PORTAL_FILE_ID_NAMESPACE = b"portal-source-archive:v1\0"
 
 
 class TalosAuditRequest(BaseModel):
-    request_id: str = Field(..., min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
-    archive_path: str = Field(..., min_length=1, max_length=1024)
-    project_name: str | None = Field(default=None, max_length=255)
-    file_sha256: str | None = Field(default=None, max_length=64)
+    """Talos starts a previously received Portal archive by its stable request ID."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(..., min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+
+
+@dataclass(frozen=True, slots=True)
+class PortalSourceArchive:
+    archive_path: Path
+    project_name: str | None
+    original_filename: str
+    sha256: str
 
 
 class TalosAuditAcceptedResponse(BaseModel):
@@ -72,27 +84,54 @@ async def _require_talos_token(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Talos integration token")
 
 
-def _resolve_archive_path(relative_archive_path: str) -> Path:
+def _portal_archive_file_id(request_id: str) -> str:
+    """Match Portal receiver's stable_file_id() without exposing a filesystem path."""
+    return hashlib.sha256(_PORTAL_FILE_ID_NAMESPACE + request_id.encode("utf-8")).hexdigest()[:32]
+
+
+def _resolve_portal_source_archive(request_id: str) -> PortalSourceArchive:
     configured_root = str(settings.TALOS_SOURCE_ARCHIVE_DIR or "").strip()
     if not configured_root:
         raise HTTPException(status_code=503, detail="Talos source archive directory is not configured")
 
-    relative_path = Path(relative_archive_path)
-    if relative_path.is_absolute() or ".." in relative_path.parts:
-        raise HTTPException(status_code=422, detail="archive_path must be relative to TALOS_SOURCE_ARCHIVE_DIR")
-
     source_root = Path(configured_root).resolve()
-    archive_path = (source_root / relative_path).resolve()
+    archive_dir = (source_root / _portal_archive_file_id(request_id)).resolve()
     try:
-        archive_path.relative_to(source_root)
+        archive_dir.relative_to(source_root)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail="archive_path must stay inside TALOS_SOURCE_ARCHIVE_DIR") from exc
+        raise HTTPException(status_code=422, detail="Resolved Portal archive is outside TALOS_SOURCE_ARCHIVE_DIR") from exc
 
-    if archive_path.suffix.lower() != ".zip":
-        raise HTTPException(status_code=422, detail="archive_path must reference a ZIP file")
+    metadata_path = archive_dir / "metadata.json"
+    archive_path = archive_dir / "source.zip"
+    if not metadata_path.is_file() or not archive_path.is_file():
+        raise HTTPException(status_code=404, detail="Portal source archive was not found for request_id")
+
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail="Portal source archive metadata is invalid") from exc
+    if not isinstance(metadata, dict) or str(metadata.get("request_id") or "") != request_id:
+        raise HTTPException(status_code=422, detail="Portal source archive metadata does not match request_id")
+
+    expected_sha256 = str(metadata.get("sha256") or "").strip().lower()
+    if not _SHA256_RE.fullmatch(expected_sha256):
+        raise HTTPException(status_code=422, detail="Portal source archive metadata has an invalid SHA-256")
+
+    project_name = metadata.get("project_name")
+    if not isinstance(project_name, str) or not project_name.strip():
+        project_name = None
+    else:
+        project_name = project_name.strip()[:255]
+    original_filename = str(metadata.get("original_filename") or "source.zip").strip() or "source.zip"
+
     if not archive_path.is_file():
-        raise HTTPException(status_code=404, detail="Source archive was not found")
-    return archive_path
+        raise HTTPException(status_code=404, detail="Portal source archive was not found for request_id")
+    return PortalSourceArchive(
+        archive_path=archive_path,
+        project_name=project_name,
+        original_filename=original_filename,
+        sha256=expected_sha256,
+    )
 
 
 def _validate_source_archive(archive_path: Path, expected_sha256: str | None) -> None:
@@ -172,12 +211,12 @@ def _to_talos_audit_status(job: TalosAuditJob, *, reused: bool = False) -> Talos
 async def _create_project_from_archive(
     *,
     request: TalosAuditRequest,
-    archive_path: Path,
+    source_archive: PortalSourceArchive,
     service_user: User,
     db: AsyncSession,
 ) -> Project:
     project = Project(
-        name=(request.project_name or f"Talos {request.request_id}").strip() or f"Talos {request.request_id}",
+        name=(source_archive.project_name or f"Talos {request.request_id}").strip() or f"Talos {request.request_id}",
         description=f"Created by Talos integration for request_id={request.request_id}",
         source_type="zip",
         repository_url=_talos_project_ref(request.request_id),
@@ -192,12 +231,12 @@ async def _create_project_from_archive(
     try:
         await save_project_zip(
             project.id,
-            str(archive_path),
-            archive_path.name,
+            str(source_archive.archive_path),
+            source_archive.original_filename,
             import_status="processing",
             keep_archive=True,
         )
-        source_meta = await materialize_project_source_from_zip(project.id, str(archive_path))
+        source_meta = await materialize_project_source_from_zip(project.id, str(source_archive.archive_path))
         project.local_path = str(source_meta["path"])
         project.workspace_mode = "audit_queued"
         await update_project_zip_meta(
@@ -231,8 +270,6 @@ async def start_talos_audit(
     db: AsyncSession = Depends(get_db),
 ) -> TalosAuditAcceptedResponse:
     """Accept a Talos audit request and schedule the Finding runtime in the background."""
-    archive_path = _resolve_archive_path(payload.archive_path)
-    _validate_source_archive(archive_path, payload.file_sha256)
     service_user = await _get_service_user(db)
 
     existing_job = await _find_talos_audit_job(
@@ -243,9 +280,11 @@ async def start_talos_audit(
         current = _to_talos_audit_status(existing_job, reused=True)
         return TalosAuditAcceptedResponse(**current.model_dump(exclude={"session_id", "finalize_finding", "error_message"}))
 
+    source_archive = _resolve_portal_source_archive(payload.request_id)
+    _validate_source_archive(source_archive.archive_path, source_archive.sha256)
     project = await _create_project_from_archive(
         request=payload,
-        archive_path=archive_path,
+        source_archive=source_archive,
         service_user=service_user,
         db=db,
     )

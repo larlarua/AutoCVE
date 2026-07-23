@@ -503,6 +503,14 @@ class FileSearchTool(AgentTool):
                 success=False,
                 error="Security error: search is limited to the audit project and approved shared roots.",
             )
+        if not os.path.isdir(search_dir):
+            return ToolResult(
+                success=False,
+                error=(
+                    "Invalid search directory: the 'directory' argument must refer to a directory, "
+                    f"not a file ({directory})."
+                ),
+            )
 
         rg = shutil.which("rg")
         if not rg:

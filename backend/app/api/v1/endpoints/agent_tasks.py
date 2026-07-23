@@ -2012,6 +2012,50 @@ def _build_finding_fingerprint(record: AgentFinding) -> str:
     return fingerprint
 
 
+def _normalize_finding_line_range(
+    raw_line_start: Any,
+    raw_line_end: Any,
+) -> tuple[Optional[int], Optional[int]]:
+    """Convert model-provided line values into database-safe integer positions.
+
+    Models and scan adapters sometimes emit a location range such as ``"407-415"``
+    in either line field.  AgentFinding stores the bounds in separate integer
+    columns, so normalize that common representation before adding the ORM record.
+    Unrecognised values deliberately become ``None`` instead of poisoning the
+    whole task transaction during flush.
+    """
+
+    def parse(value: Any) -> tuple[Optional[int], Optional[int]]:
+        if value is None or isinstance(value, bool):
+            return None, None
+        if isinstance(value, int):
+            return (value, None) if value >= 1 else (None, None)
+        if isinstance(value, float):
+            if value.is_integer() and value >= 1:
+                return int(value), None
+            return None, None
+
+        text = str(value).strip()
+        if not text:
+            return None, None
+        match = re.fullmatch(r"(?:line\s*)?(\d+)(?:\s*[-–—~]\s*(\d+))?", text, flags=re.IGNORECASE)
+        if not match:
+            return None, None
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else None
+        return start, end
+
+    start, start_range_end = parse(raw_line_start)
+    end_start, end_range_end = parse(raw_line_end)
+
+    if start is None:
+        start = end_start
+    end = end_range_end or end_start or start_range_end or start
+    if start is not None and end is not None and end < start:
+        end = start
+    return start, end
+
+
 async def _save_findings(
     db: AsyncSession,
     task_id: str,
@@ -2143,13 +2187,17 @@ async def _save_findings(
                     )
                     continue
 
-            line_start = finding.get("line_start") or finding.get("line")
-            if not line_start and ":" in location:
-                try:
-                    line_start = int(location.split(":")[1])
-                except (ValueError, IndexError):
-                    line_start = None
-            line_end = finding.get("line_end") or line_start
+            raw_line_start = finding.get("line_start") or finding.get("line")
+            if not raw_line_start and ":" in location:
+                raw_line_start = location.rsplit(":", 1)[-1]
+            raw_line_end = finding.get("line_end") or raw_line_start
+            line_start, line_end = _normalize_finding_line_range(raw_line_start, raw_line_end)
+            if raw_line_start is not None and line_start is None:
+                logger.warning(
+                    "[SaveFindings] Ignoring invalid line location %r for finding %r",
+                    raw_line_start,
+                    str(finding.get("title") or "")[:120],
+                )
 
             code_snippet = finding.get("code_snippet") or finding.get("code") or finding.get("vulnerable_code")
             title = finding.get("title")

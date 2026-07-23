@@ -1034,6 +1034,35 @@ async def test_save_findings_uses_supported_status_and_model_fields(mock_db_sess
     assert record.finding_metadata["raw_finding"]["title"] == "Confirmed traversal in uploadLocal"
 
 
+@pytest.mark.asyncio
+async def test_save_findings_normalizes_model_line_range(mock_db_session, temp_project_dir):
+    saved = await _save_findings(
+        mock_db_session,
+        task_id="test-task-id",
+        findings=[
+            {
+                "title": "Mass assignment in user update",
+                "description": "The update accepts a privileged field.",
+                "vulnerability_type": "auth_bypass",
+                "severity": "critical",
+                "file_path": "src/path_vuln.py",
+                "line_start": "407-415",
+                "line_end": "407-415",
+                "code_snippet": "User.update(req.body)",
+                "suggestion": "Use an allowlist.",
+                "confidence": 0.9,
+                "verdict": "confirmed",
+            }
+        ],
+        project_root=temp_project_dir,
+    )
+
+    assert saved == 1
+    record = mock_db_session.add.call_args[0][0]
+    assert record.line_start == 407
+    assert record.line_end == 415
+
+
 
 @pytest.mark.asyncio
 async def test_save_findings_does_not_mark_empty_normalized_poc_as_present(mock_db_session, temp_project_dir):

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
+import json
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +32,28 @@ def _zip_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def _write_portal_archive(source_root: Path, request_id: str, *, project_name: str = "Portal Demo") -> Path:
+    archive_bytes = _zip_bytes()
+    file_id = talos_audit_endpoint._portal_archive_file_id(request_id)
+    archive_dir = source_root / file_id
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "source.zip").write_bytes(archive_bytes)
+    (archive_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "file_id": file_id,
+                "request_id": request_id,
+                "project_name": project_name,
+                "original_filename": "portal-demo.zip",
+                "size_bytes": len(archive_bytes),
+                "sha256": hashlib.sha256(archive_bytes).hexdigest(),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return archive_dir
+
+
 def _build_app(session_factory) -> FastAPI:
     app = FastAPI()
     app.include_router(talos_audit_router, prefix="/api/v1/integrations/talos")
@@ -53,7 +77,7 @@ async def test_talos_route_is_hidden_when_not_configured(monkeypatch):
         response = await client.post(
             "/api/v1/integrations/talos/audits",
             headers={"X-Talos-Token": "ignored"},
-            json={"request_id": "portal-1", "archive_path": "portal-1.zip"},
+            json={"request_id": "portal-1"},
         )
 
     assert response.status_code == 404
@@ -81,7 +105,7 @@ async def test_talos_queues_zip_project_and_exposes_finalize_result(monkeypatch,
 
     source_root = tmp_path / "portal-archives"
     source_root.mkdir()
-    (source_root / "portal-1.zip").write_bytes(_zip_bytes())
+    _write_portal_archive(source_root, "portal-1")
     monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_TOKEN", "test-secret")
     monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_ENABLED", True)
     monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_AUDIT_SERVICE_USER_EMAIL", "talos@example.internal")
@@ -101,11 +125,7 @@ async def test_talos_queues_zip_project_and_exposes_finalize_result(monkeypatch,
         response = await client.post(
             "/api/v1/integrations/talos/audits",
             headers={"X-Talos-Token": "test-secret"},
-            json={
-                "request_id": "portal-1",
-                "project_name": "Portal Demo",
-                "archive_path": "portal-1.zip",
-            },
+            json={"request_id": "portal-1"},
         )
 
     assert response.status_code == 200, response.text
@@ -122,6 +142,7 @@ async def test_talos_queues_zip_project_and_exposes_finalize_result(monkeypatch,
         assert job.project_id == project.id
         assert job.status == TalosAuditJobStatus.QUEUED
         assert project.source_type == "zip"
+        assert project.name == "Portal Demo"
         assert project.repository_url == "talos:portal-1"
         assert project.workspace_mode == "audit_queued"
         assert project.local_path is not None
@@ -156,7 +177,7 @@ async def test_talos_queues_zip_project_and_exposes_finalize_result(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_talos_rejects_path_outside_configured_archive_directory(monkeypatch, tmp_path):
+async def test_talos_rejects_client_supplied_archive_path(monkeypatch, tmp_path):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     app = _build_app(session_factory)
@@ -173,6 +194,37 @@ async def test_talos_rejects_path_outside_configured_archive_directory(monkeypat
 
     assert response.status_code == 422
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_talos_resolves_request_id_from_portal_metadata(monkeypatch, tmp_path):
+    source_root = tmp_path / "portal-archives"
+    source_root.mkdir()
+    archive_dir = _write_portal_archive(source_root, "portal-1", project_name="Receiver Project")
+    monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_SOURCE_ARCHIVE_DIR", str(source_root))
+
+    source_archive = talos_audit_endpoint._resolve_portal_source_archive("portal-1")
+
+    assert source_archive.archive_path == archive_dir / "source.zip"
+    assert source_archive.project_name == "Receiver Project"
+    assert source_archive.original_filename == "portal-demo.zip"
+
+
+@pytest.mark.asyncio
+async def test_talos_rejects_portal_metadata_for_another_request(monkeypatch, tmp_path):
+    source_root = tmp_path / "portal-archives"
+    source_root.mkdir()
+    archive_dir = _write_portal_archive(source_root, "portal-1")
+    metadata_path = archive_dir / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["request_id"] = "portal-other"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    monkeypatch.setattr(talos_audit_endpoint.settings, "TALOS_SOURCE_ARCHIVE_DIR", str(source_root))
+
+    with pytest.raises(talos_audit_endpoint.HTTPException) as exc_info:
+        talos_audit_endpoint._resolve_portal_source_archive("portal-1")
+
+    assert exc_info.value.status_code == 422
 
 
 @pytest.mark.asyncio
