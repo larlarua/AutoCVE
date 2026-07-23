@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.api.v1.api import api_router
+from app.api.v1.endpoints.talos_audit import talos_alias_router
 from app.db.session import AsyncSessionLocal
 from app.db.init_db import init_db
 
@@ -112,6 +113,7 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
+app.include_router(talos_alias_router)
 
 
 @app.get("/health")

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import app.api.v1.endpoints.talos_audit as talos_audit_endpoint
 import app.services.talos_audit.runner as talos_audit_runner
-from app.api.v1.endpoints.talos_audit import router as talos_audit_router
+from app.api.v1.endpoints.talos_audit import router as talos_audit_router, talos_alias_router
 from app.db.base import Base
 from app.models.agent_task import AgentTask, AgentTaskStatus
 from app.models.audit_session import AuditSession, AuditSessionTurn, AuditToolCall
@@ -57,6 +57,7 @@ def _write_portal_archive(source_root: Path, request_id: str, *, project_name: s
 def _build_app(session_factory) -> FastAPI:
     app = FastAPI()
     app.include_router(talos_audit_router, prefix="/api/v1/integrations/talos")
+    app.include_router(talos_alias_router)
 
     async def get_test_db():
         async with session_factory() as db:
@@ -75,7 +76,7 @@ async def test_talos_route_is_hidden_when_not_configured(monkeypatch):
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
-            "/api/v1/integrations/talos/audits",
+            "/start",
             headers={"X-Talos-Token": "ignored"},
             json={"request_id": "portal-1"},
         )
@@ -123,7 +124,7 @@ async def test_talos_queues_zip_project_and_exposes_finalize_result(monkeypatch,
     app = _build_app(session_factory)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
-            "/api/v1/integrations/talos/audits",
+            "/start",
             headers={"X-Talos-Token": "test-secret"},
             json={"request_id": "portal-1"},
         )
@@ -187,7 +188,7 @@ async def test_talos_rejects_client_supplied_archive_path(monkeypatch, tmp_path)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post(
-            "/api/v1/integrations/talos/audits",
+            "/start",
             headers={"X-Talos-Token": "test-secret"},
             json={"request_id": "portal-1", "archive_path": "../secret.zip"},
         )

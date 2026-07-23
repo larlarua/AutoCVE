@@ -39,6 +39,10 @@ from app.services.zip_storage import (
 )
 
 router = APIRouter()
+# Talos uses a fixed root-level contract (POST /start).  Keep the existing
+# versioned router for backward compatibility, but route both entry points to
+# the same implementation below.
+talos_alias_router = APIRouter()
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _PORTAL_FILE_ID_NAMESPACE = b"portal-source-archive:v1\0"
@@ -263,11 +267,10 @@ async def _find_talos_audit_job(*, request_id: str, db: AsyncSession) -> TalosAu
     return result.scalar_one_or_none()
 
 
-@router.post("/audits", response_model=TalosAuditAcceptedResponse)
-async def start_talos_audit(
+async def _start_talos_audit(
+    *,
     payload: TalosAuditRequest,
-    _: None = Depends(_require_talos_token),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession,
 ) -> TalosAuditAcceptedResponse:
     """Accept a Talos audit request and schedule the Finding runtime in the background."""
     service_user = await _get_service_user(db)
@@ -309,6 +312,26 @@ async def start_talos_audit(
         project_id=job.project_id,
         status=job.status,
     )
+
+
+@router.post("/audits", response_model=TalosAuditAcceptedResponse)
+async def start_talos_audit(
+    payload: TalosAuditRequest,
+    _: None = Depends(_require_talos_token),
+    db: AsyncSession = Depends(get_db),
+) -> TalosAuditAcceptedResponse:
+    """Versioned Talos start endpoint retained for existing callers."""
+    return await _start_talos_audit(payload=payload, db=db)
+
+
+@talos_alias_router.post("/start", response_model=TalosAuditAcceptedResponse, tags=["talos-integration"])
+async def start_talos_audit_alias(
+    payload: TalosAuditRequest,
+    _: None = Depends(_require_talos_token),
+    db: AsyncSession = Depends(get_db),
+) -> TalosAuditAcceptedResponse:
+    """Talos-compatible root alias for starting an audit."""
+    return await _start_talos_audit(payload=payload, db=db)
 
 
 @router.get("/audits/{request_id}", response_model=TalosAuditStatusResponse)
