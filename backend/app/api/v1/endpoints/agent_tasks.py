@@ -1477,7 +1477,8 @@ async def _execute_agent_task_impl(task_id: str):
                     task=task,
                     findings=saved_findings,
                 )
-                if AUTO_MANAGED_REPORT_POSTPROCESSING_ENABLED:
+                skip_report_generation = bool((task.agent_config or {}).get("skip_report_generation"))
+                if AUTO_MANAGED_REPORT_POSTPROCESSING_ENABLED and not skip_report_generation:
                     managed_report_stats = await _auto_generate_managed_vulnerability_reports(
                         db,
                         task=task,
@@ -1488,7 +1489,7 @@ async def _execute_agent_task_impl(task_id: str):
                 else:
                     managed_report_stats = _disabled_managed_report_stats(saved_findings)
                 project_ref = await db.get(Project, task.project_id)
-                if project_ref:
+                if project_ref and not skip_report_generation:
                     from app.services.task_report_service import generate_task_report
                     await generate_task_report(db, task, project_ref, saved_findings)
                 await db.commit()
@@ -1508,8 +1509,12 @@ async def _execute_agent_task_impl(task_id: str):
                     await event_emitter.emit_info(
                         f"Managed vulnerability import failed for {managed_record_stats['failed']} findings"
                     )
-                await event_emitter.emit_info("Final vulnerability report generated")
-                await event_emitter.emit_phase_complete("reporting", f"Audit completed with {saved_count} findings")
+                if skip_report_generation:
+                    await event_emitter.emit_info("Skipped report generation for this audit task")
+                    await event_emitter.emit_phase_complete("analysis", f"Audit completed with {saved_count} findings")
+                else:
+                    await event_emitter.emit_info("Final vulnerability report generated")
+                    await event_emitter.emit_phase_complete("reporting", f"Audit completed with {saved_count} findings")
             else:
                 task_was_cancelled = is_task_cancelled(task_id)
                 task.status = AgentTaskStatus.CANCELLED if task_was_cancelled else AgentTaskStatus.FAILED

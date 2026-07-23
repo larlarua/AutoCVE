@@ -23,6 +23,7 @@ class TalosAuditJob(Base):
     request_id = Column(String(255), nullable=False, unique=True, index=True)
     project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
     service_user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    agent_task_id = Column(String(36), ForeignKey("agent_tasks.id", ondelete="SET NULL"), nullable=True, index=True)
     audit_session_id = Column(String(36), ForeignKey("audit_sessions.id", ondelete="SET NULL"), nullable=True, index=True)
     status = Column(String(32), nullable=False, default=TalosAuditJobStatus.QUEUED, index=True)
     finalize_finding = Column(JSON, nullable=True)

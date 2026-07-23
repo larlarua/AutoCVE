@@ -23,7 +23,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.session import get_db
 from app.models.project import Project
+from app.models.agent_task import AgentTask, AgentTaskStatus
 from app.models.talos_audit import TalosAuditJob, TalosAuditJobStatus
+from app.services.agent.task_executor import request_agent_task_cancellation
 from app.models.user import User
 from app.services.talos_audit.task_queue import enqueue_talos_audit_job
 from app.services.zip_storage import (
@@ -305,11 +307,17 @@ async def cancel_talos_audit(
 
     if job.status != TalosAuditJobStatus.CANCELLED:
         project = await db.get(Project, job.project_id)
+        task = await db.get(AgentTask, job.agent_task_id) if job.agent_task_id else None
         job.status = TalosAuditJobStatus.CANCELLED
         job.error_message = "Talos audit cancelled by request"
         job.completed_at = datetime.now(timezone.utc)
         if project is not None:
             project.workspace_mode = "audit_cancelled"
+        if task is not None and task.status not in {AgentTaskStatus.COMPLETED, AgentTaskStatus.FAILED, AgentTaskStatus.CANCELLED}:
+            task.status = AgentTaskStatus.CANCELLED
+            task.error_message = "Cancelled by Talos audit request"
+            task.completed_at = datetime.now(timezone.utc)
+            request_agent_task_cancellation(str(task.id))
         await db.commit()
         await db.refresh(job)
 
