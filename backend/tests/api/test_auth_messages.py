@@ -103,3 +103,60 @@ async def test_register_existing_email_message():
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == "该邮箱已被注册"
+
+
+@pytest.mark.asyncio
+async def test_register_first_user_allowed_when_public_registration_disabled(monkeypatch):
+    monkeypatch.setattr("app.api.v1.endpoints.auth.settings.ALLOW_PUBLIC_REGISTRATION", False)
+    monkeypatch.setattr("app.api.v1.endpoints.auth.security.get_password_hash", lambda password: "hashed")
+    db = _FakeAsyncSession([None, []])
+
+    user = await register(
+        db=db,
+        user_in=RegisterRequest(
+            email="admin@example.com",
+            password="password123",
+            full_name="Admin",
+        ),
+    )
+
+    assert user.is_superuser is True
+    assert user.role == "admin"
+
+
+@pytest.mark.asyncio
+async def test_register_rejected_when_public_registration_disabled(monkeypatch):
+    monkeypatch.setattr("app.api.v1.endpoints.auth.settings.ALLOW_PUBLIC_REGISTRATION", False)
+    db = _FakeAsyncSession([None, [_FakeUser()]])
+
+    with pytest.raises(HTTPException) as exc_info:
+        await register(
+            db=db,
+            user_in=RegisterRequest(
+                email="new@example.com",
+                password="password123",
+                full_name="New User",
+            ),
+        )
+
+    assert exc_info.value.status_code == 403
+    assert exc_info.value.detail == "公开注册已关闭，请联系管理员创建账户"
+
+
+@pytest.mark.asyncio
+async def test_register_allowed_when_public_registration_enabled(monkeypatch):
+    monkeypatch.setattr("app.api.v1.endpoints.auth.settings.ALLOW_PUBLIC_REGISTRATION", True)
+    monkeypatch.setattr("app.api.v1.endpoints.auth.security.get_password_hash", lambda password: "hashed")
+    db = _FakeAsyncSession([None, [_FakeUser()]])
+
+    user = await register(
+        db=db,
+        user_in=RegisterRequest(
+            email="new@example.com",
+            password="password123",
+            full_name="New User",
+        ),
+    )
+
+    assert user.is_superuser is False
+    assert user.role == "member"

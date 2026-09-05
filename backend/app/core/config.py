@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     SECRET_KEY: str = "changethis_in_production_to_a_long_random_string"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8
+    ALLOW_PUBLIC_REGISTRATION: bool = False
 
     BACKEND_CORS_ORIGINS: List[AnyHttpUrl] = []
 

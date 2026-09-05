@@ -61,6 +61,9 @@ async def register(
     all_users = count_result.scalars().all()
     is_first_user = len(all_users) == 0
 
+    if not is_first_user and not settings.ALLOW_PUBLIC_REGISTRATION:
+        raise HTTPException(status_code=403, detail="公开注册已关闭，请联系管理员创建账户")
+
     db_user = User(
         email=user_in.email,
         hashed_password=security.get_password_hash(user_in.password),
